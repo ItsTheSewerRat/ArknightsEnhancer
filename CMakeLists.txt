@@ -12,6 +12,7 @@ endif()
 
 add_library(ArknightsEnhancer SHARED
     src/arknights_enhancer.cpp
+    src/window_enhancements.cpp
 )
 
 target_compile_features(ArknightsEnhancer PRIVATE cxx_std_17)
@@ -24,7 +25,12 @@ target_compile_definitions(ArknightsEnhancer PRIVATE
 target_include_directories(ArknightsEnhancer SYSTEM PRIVATE
     "${RESHADE_SDK_DIR}/include"
 )
-target_link_libraries(ArknightsEnhancer PRIVATE user32)
+target_link_libraries(ArknightsEnhancer PRIVATE
+    dwmapi
+    gdi32
+    ole32
+    user32
+)
 
 if(MSVC)
     target_compile_options(ArknightsEnhancer PRIVATE

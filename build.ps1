@@ -57,4 +57,3 @@ if ($LASTEXITCODE -ne 0) {
 
 $outputPath = Join-Path $BuildDirectory "Release\ArknightsEnhancer.addon64"
 Write-Host "Built: $outputPath"
-

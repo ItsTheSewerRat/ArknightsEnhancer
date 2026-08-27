@@ -5,6 +5,8 @@
 
 #include <reshade.hpp>
 
+#include "window_enhancements.hpp"
+
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -15,6 +17,7 @@ namespace
         static_cast<UINT_PTR>(UINT64_C(0x41574B4457415344));
     constexpr UINT k_cancel_drag_message = WM_APP + 0x5A1;
     constexpr UINT k_drag_delay_ms = 10;
+    constexpr ULONGLONG k_position_hook_delay_ms = 5000;
     constexpr UINT k_path_point_count = 4;
     constexpr LONG k_drag_threshold_pixels = 3;
 
@@ -22,8 +25,10 @@ namespace
     {
         HWND window = nullptr;
         HHOOK message_hook = nullptr;
+        HHOOK position_hook = nullptr;
         DWORD window_thread_id = 0;
         reshade::api::effect_runtime *runtime = nullptr;
+        ULONGLONG position_hook_ready_at = 0;
 
         bool tracking_physical_drag = false;
         bool physical_drag_moved = false;
@@ -476,13 +481,74 @@ namespace
         return CallNextHookEx(nullptr, code, wparam, lparam);
     }
 
+
+    LRESULT CALLBACK position_window_hook(int code, WPARAM wparam, LPARAM lparam)
+    {
+        if (code >= 0)
+        {
+            auto *const message = reinterpret_cast<CWPSTRUCT *>(lparam);
+            if (message != nullptr && message->hwnd == g_input.window)
+            {
+                if (message->message == WM_MOVING && message->lParam != 0)
+                {
+                    const auto *const proposed =
+                        reinterpret_cast<const RECT *>(message->lParam);
+                    arknights::preview_game_window_move(
+                        proposed->left,
+                        proposed->top);
+                }
+                else if (message->message == WM_WINDOWPOSCHANGING &&
+                         message->lParam != 0)
+                {
+                    const auto *const proposed =
+                        reinterpret_cast<const WINDOWPOS *>(message->lParam);
+                    if ((proposed->flags & SWP_NOMOVE) == 0)
+                    {
+                        arknights::preview_game_window_move(
+                            proposed->x,
+                            proposed->y);
+                    }
+                }
+            }
+        }
+
+        return CallNextHookEx(nullptr, code, wparam, lparam);
+    }
+
+    void install_position_hook() noexcept
+    {
+        if (g_input.position_hook != nullptr ||
+            g_input.window_thread_id == 0 ||
+            GetTickCount64() < g_input.position_hook_ready_at)
+        {
+            return;
+        }
+
+        g_input.position_hook = SetWindowsHookExW(
+            WH_CALLWNDPROC,
+            position_window_hook,
+            nullptr,
+            g_input.window_thread_id);
+        if (g_input.position_hook == nullptr)
+        {
+            g_input.position_hook = SetWindowsHookExW(
+                WH_CALLWNDPROC,
+                position_window_hook,
+                g_module,
+                g_input.window_thread_id);
+        }
+    }
+
     void uninstall_input_hook() noexcept
     {
-        const HHOOK hook = g_input.message_hook;
+        const HHOOK message_hook = g_input.message_hook;
+        const HHOOK position_hook = g_input.position_hook;
 
         finish_active_direction();
-        if (hook != nullptr)
-            UnhookWindowsHookEx(hook);
+        if (message_hook != nullptr)
+            UnhookWindowsHookEx(message_hook);
+        if (position_hook != nullptr)
+            UnhookWindowsHookEx(position_hook);
 
         g_input = {};
         g_reshade_overlay_open.store(false, std::memory_order_relaxed);
@@ -494,38 +560,52 @@ namespace
         if (window == nullptr)
             return;
 
-        if (g_input.message_hook != nullptr && g_input.window == window)
-        {
-            g_input.runtime = runtime;
-            return;
-        }
-
-        uninstall_input_hook();
-
         DWORD process_id = 0;
         const DWORD thread_id = GetWindowThreadProcessId(window, &process_id);
         if (thread_id == 0 || process_id != GetCurrentProcessId())
             return;
 
-        g_input.window = window;
+        if (g_input.window != window)
+        {
+            uninstall_input_hook();
+            arknights::uninstall_window_enhancements();
+            g_input.window = window;
+        }
+
         g_input.window_thread_id = thread_id;
         g_input.runtime = runtime;
+        if (g_input.position_hook_ready_at == 0)
+        {
+            g_input.position_hook_ready_at =
+                GetTickCount64() + k_position_hook_delay_ms;
+        }
+        arknights::install_window_enhancements(window, g_module);
+
+        if (g_input.message_hook != nullptr)
+            return;
+
         g_input.message_hook = SetWindowsHookExW(WH_GETMESSAGE, get_message_hook, nullptr, thread_id);
 
         if (g_input.message_hook == nullptr)
             g_input.message_hook = SetWindowsHookExW(WH_GETMESSAGE, get_message_hook, g_module, thread_id);
-
-        if (g_input.message_hook == nullptr)
-        {
-            g_input = {};
-            return;
-        }
     }
 
     void on_destroy_effect_runtime(reshade::api::effect_runtime *runtime)
     {
         if (runtime == g_input.runtime)
-            uninstall_input_hook();
+        {
+            g_input.runtime = nullptr;
+            g_reshade_overlay_open.store(false, std::memory_order_relaxed);
+        }
+    }
+
+    void on_reshade_present(reshade::api::effect_runtime *runtime)
+    {
+        if (runtime == g_input.runtime)
+        {
+            arknights::notify_window_presented();
+            install_position_hook();
+        }
     }
 
     bool on_reshade_open_overlay(
@@ -544,7 +624,8 @@ extern "C" __declspec(dllexport) const char *NAME = "ArknightsEnhancer";
 extern "C" __declspec(dllexport) const char *AUTHOR = "ItsTheSewerRat";
 extern "C" __declspec(dllexport) const char *DESCRIPTION =
     "Quality-of-life features for Arknights: set deploy direction of operators "
-    "with WASD and press the Skip button with Tab.";
+    "with WASD, press the Skip button with Tab, resize the game window, and "
+    "control game audio from the title bar.";
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {
@@ -558,10 +639,12 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 
         reshade::register_event<reshade::addon_event::init_effect_runtime>(on_init_effect_runtime);
         reshade::register_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
+        reshade::register_event<reshade::addon_event::reshade_present>(on_reshade_present);
         reshade::register_event<reshade::addon_event::reshade_open_overlay>(on_reshade_open_overlay);
         break;
 
     case DLL_PROCESS_DETACH:
+        arknights::request_window_enhancements_shutdown();
         uninstall_input_hook();
         reshade::unregister_addon(module);
         break;
