@@ -1,0 +1,571 @@
+// Operator-positioning behavior based on https://github.com/ACK72/THRM-EX
+
+#include <windows.h>
+#include <windowsx.h>
+
+#include <reshade.hpp>
+
+#include <atomic>
+#include <cstdint>
+#include <cstdlib>
+
+namespace
+{
+    constexpr UINT_PTR k_drag_timer_id =
+        static_cast<UINT_PTR>(UINT64_C(0x41574B4457415344));
+    constexpr UINT k_cancel_drag_message = WM_APP + 0x5A1;
+    constexpr UINT k_drag_delay_ms = 10;
+    constexpr UINT k_path_point_count = 4;
+    constexpr LONG k_drag_threshold_pixels = 3;
+
+    struct input_state
+    {
+        HWND window = nullptr;
+        HHOOK message_hook = nullptr;
+        DWORD window_thread_id = 0;
+        reshade::api::effect_runtime *runtime = nullptr;
+
+        bool tracking_physical_drag = false;
+        bool physical_drag_moved = false;
+        POINT physical_drag_start = {};
+
+        bool anchor_valid = false;
+        POINT anchor = {};
+
+        UINT active_key = 0;
+        POINT drag_origin_screen = {};
+        POINT drag_target_screen = {};
+        UINT_PTR timer_id = 0;
+        bool injected_button_down = false;
+        bool target_reached = false;
+        bool key_release_pending = false;
+        std::uint8_t consumed_direction_keys = 0;
+        bool tab_down = false;
+    };
+
+    input_state g_input;
+    HMODULE g_module = nullptr;
+    std::atomic_bool g_reshade_overlay_open = false;
+
+    enum class direction : std::uint8_t
+    {
+        none = 0,
+        up = 1u << 0,
+        down = 1u << 1,
+        left = 1u << 2,
+        right = 1u << 3,
+    };
+
+    [[nodiscard]] direction direction_from_key(UINT key) noexcept
+    {
+        switch (key)
+        {
+        case 'W': return direction::up;
+        case 'S': return direction::down;
+        case 'A': return direction::left;
+        case 'D': return direction::right;
+        default: return direction::none;
+        }
+    }
+
+    [[nodiscard]] POINT point_from_message(LPARAM value) noexcept
+    {
+        return POINT { GET_X_LPARAM(value), GET_Y_LPARAM(value) };
+    }
+
+    [[nodiscard]] LPARAM point_to_message(POINT point) noexcept
+    {
+        return MAKELPARAM(
+            static_cast<WORD>(static_cast<SHORT>(point.x)),
+            static_cast<WORD>(static_cast<SHORT>(point.y)));
+    }
+
+    void consume_message(MSG &message) noexcept
+    {
+        message.message = WM_NULL;
+        message.wParam = 0;
+        message.lParam = 0;
+    }
+
+    [[nodiscard]] POINT clamp_to_client(POINT point, const RECT &client) noexcept
+    {
+        if (point.x < client.left) point.x = client.left;
+        if (point.y < client.top) point.y = client.top;
+        if (point.x >= client.right) point.x = client.right - 1;
+        if (point.y >= client.bottom) point.y = client.bottom - 1;
+        return point;
+    }
+
+    [[nodiscard]] bool make_move_input(POINT point, INPUT &input) noexcept
+    {
+        const LONG left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        const LONG top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        const LONG width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        const LONG height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if (width <= 1 || height <= 1)
+            return false;
+
+        if (point.x < left) point.x = left;
+        if (point.y < top) point.y = top;
+        if (point.x >= left + width) point.x = left + width - 1;
+        if (point.y >= top + height) point.y = top + height - 1;
+
+        input = {};
+        input.type = INPUT_MOUSE;
+        input.mi.dx = MulDiv(point.x - left, 65535, width - 1);
+        input.mi.dy = MulDiv(point.y - top, 65535, height - 1);
+        input.mi.dwFlags = MOUSEEVENTF_MOVE |
+            MOUSEEVENTF_ABSOLUTE |
+            MOUSEEVENTF_VIRTUALDESK |
+            MOUSEEVENTF_MOVE_NOCOALESCE;
+        return true;
+    }
+
+    [[nodiscard]] bool move_cursor(POINT point) noexcept
+    {
+        INPUT input = {};
+        return make_move_input(point, input) && SendInput(1, &input, sizeof(input)) == 1;
+    }
+
+    [[nodiscard]] bool move_drag_path() noexcept
+    {
+        INPUT inputs[k_path_point_count] = {};
+        for (UINT index = 0; index < k_path_point_count; ++index)
+        {
+            const LONG step = static_cast<LONG>(index + 1);
+            const LONG count = static_cast<LONG>(k_path_point_count);
+            const POINT point = {
+                g_input.drag_origin_screen.x +
+                    ((g_input.drag_target_screen.x - g_input.drag_origin_screen.x) * step) / count,
+                g_input.drag_origin_screen.y +
+                    ((g_input.drag_target_screen.y - g_input.drag_origin_screen.y) * step) / count,
+            };
+
+            if (!make_move_input(point, inputs[index]))
+                return false;
+        }
+
+        return SendInput(k_path_point_count, inputs, sizeof(INPUT)) == k_path_point_count;
+    }
+
+    [[nodiscard]] bool send_left_button(bool down) noexcept
+    {
+        INPUT input = {};
+        input.type = INPUT_MOUSE;
+        input.mi.dwFlags = down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
+        return SendInput(1, &input, sizeof(input)) == 1;
+    }
+
+    void release_left_button() noexcept
+    {
+        static_cast<void>(send_left_button(false));
+
+        if (g_input.window != nullptr)
+        {
+            POINT target = g_input.drag_target_screen;
+            if (ScreenToClient(g_input.window, &target))
+                SendMessageW(g_input.window, WM_LBUTTONUP, 0, point_to_message(target));
+            if (GetCapture() == g_input.window)
+                ReleaseCapture();
+        }
+    }
+
+    [[nodiscard]] bool click_skip_button() noexcept
+    {
+        if (g_input.window == nullptr)
+            return false;
+
+        RECT client = {};
+        if (!GetClientRect(g_input.window, &client))
+            return false;
+
+        const LONG width = client.right - client.left;
+        const LONG height = client.bottom - client.top;
+        if (width <= 0 || height <= 0)
+            return false;
+
+        POINT target = {
+            client.left + MulDiv(width, 96, 100),
+            client.top + MulDiv(height, 6, 100),
+        };
+        target = clamp_to_client(target, client);
+        if (!ClientToScreen(g_input.window, &target) || !move_cursor(target))
+            return false;
+
+        const bool pressed = send_left_button(true);
+        const bool released = send_left_button(false);
+        return pressed && released;
+    }
+
+    void clear_active_direction() noexcept
+    {
+        if (g_input.timer_id != 0 && g_input.window != nullptr)
+            KillTimer(g_input.window, g_input.timer_id);
+
+        g_input.active_key = 0;
+        g_input.drag_origin_screen = {};
+        g_input.drag_target_screen = {};
+        g_input.timer_id = 0;
+        g_input.injected_button_down = false;
+        g_input.target_reached = false;
+        g_input.key_release_pending = false;
+        g_input.consumed_direction_keys = 0;
+    }
+
+    void finish_active_direction() noexcept
+    {
+        if (g_input.injected_button_down)
+            release_left_button();
+        clear_active_direction();
+    }
+
+    [[nodiscard]] bool begin_direction_drag(MSG &message, UINT key, direction facing) noexcept
+    {
+        if (!g_input.anchor_valid || g_input.window == nullptr)
+            return false;
+
+        RECT client = {};
+        if (!GetClientRect(g_input.window, &client))
+            return false;
+
+        const LONG width = client.right - client.left;
+        const LONG height = client.bottom - client.top;
+        if (width <= 0 || height <= 0)
+            return false;
+
+        const POINT origin = clamp_to_client(g_input.anchor, client);
+        POINT target = origin;
+        const LONG horizontal_distance = MulDiv(width, 15, 100);
+        const LONG vertical_distance = MulDiv(height, 15, 100);
+
+        switch (facing)
+        {
+        case direction::up: target.y -= vertical_distance; break;
+        case direction::down: target.y += vertical_distance; break;
+        case direction::left: target.x -= horizontal_distance; break;
+        case direction::right: target.x += horizontal_distance; break;
+        case direction::none: return false;
+        }
+
+        target = clamp_to_client(target, client);
+        POINT origin_screen = origin;
+        POINT target_screen = target;
+        if (!ClientToScreen(g_input.window, &origin_screen) ||
+            !ClientToScreen(g_input.window, &target_screen))
+        {
+            return false;
+        }
+
+        g_input.active_key = key;
+        g_input.drag_origin_screen = origin_screen;
+        g_input.drag_target_screen = target_screen;
+        g_input.target_reached = false;
+        g_input.key_release_pending = false;
+
+        if (!move_cursor(origin_screen) || !send_left_button(true))
+        {
+            clear_active_direction();
+            return false;
+        }
+
+        g_input.injected_button_down = true;
+        consume_message(message);
+        g_input.timer_id = SetTimer(g_input.window, k_drag_timer_id, k_drag_delay_ms, nullptr);
+
+        if (g_input.timer_id == 0)
+        {
+            static_cast<void>(move_drag_path());
+            g_input.target_reached = true;
+        }
+
+        return true;
+    }
+
+    void complete_drag_path(MSG &message) noexcept
+    {
+        if (g_input.active_key == 0 || !g_input.injected_button_down)
+        {
+            consume_message(message);
+            return;
+        }
+
+        KillTimer(g_input.window, g_input.timer_id);
+        g_input.timer_id = 0;
+
+        static_cast<void>(move_drag_path());
+        g_input.target_reached = true;
+        consume_message(message);
+
+        if (g_input.key_release_pending ||
+            (GetAsyncKeyState(static_cast<int>(g_input.active_key)) & 0x8000) == 0)
+        {
+            finish_active_direction();
+        }
+    }
+
+    void track_physical_mouse_message(const MSG &message) noexcept
+    {
+        const POINT point = point_from_message(message.lParam);
+
+        switch (message.message)
+        {
+        case WM_LBUTTONDOWN:
+            g_input.tracking_physical_drag = true;
+            g_input.physical_drag_moved = false;
+            g_input.physical_drag_start = point;
+            g_input.anchor_valid = false;
+            break;
+
+        case WM_MOUSEMOVE:
+            if (g_input.tracking_physical_drag && (message.wParam & MK_LBUTTON) != 0)
+            {
+                const LONG delta_x = std::labs(point.x - g_input.physical_drag_start.x);
+                const LONG delta_y = std::labs(point.y - g_input.physical_drag_start.y);
+                if (delta_x >= k_drag_threshold_pixels || delta_y >= k_drag_threshold_pixels)
+                    g_input.physical_drag_moved = true;
+            }
+            break;
+
+        case WM_LBUTTONUP:
+            if (g_input.tracking_physical_drag)
+            {
+                g_input.anchor_valid = g_input.physical_drag_moved;
+                if (g_input.anchor_valid)
+                    g_input.anchor = point;
+            }
+            g_input.tracking_physical_drag = false;
+            g_input.physical_drag_moved = false;
+            break;
+
+        default:
+            break;
+        }
+    }
+
+    void process_game_message(MSG &message) noexcept
+    {
+        if (message.message == k_cancel_drag_message)
+        {
+            finish_active_direction();
+            g_input.tab_down = false;
+            consume_message(message);
+            return;
+        }
+
+        if (message.message == WM_KILLFOCUS ||
+            (message.message == WM_ACTIVATEAPP && message.wParam == FALSE))
+        {
+            finish_active_direction();
+            g_input.tracking_physical_drag = false;
+            g_input.anchor_valid = false;
+            g_input.tab_down = false;
+            return;
+        }
+
+        if (message.message == WM_TIMER &&
+            g_input.timer_id != 0 &&
+            message.wParam == g_input.timer_id)
+        {
+            complete_drag_path(message);
+            return;
+        }
+
+        const bool overlay_open = g_reshade_overlay_open.load(std::memory_order_relaxed);
+        if (!overlay_open &&
+            (message.message == WM_LBUTTONDOWN ||
+             message.message == WM_MOUSEMOVE ||
+             message.message == WM_LBUTTONUP))
+        {
+            if (g_input.active_key == 0)
+                track_physical_mouse_message(message);
+            return;
+        }
+
+        if (overlay_open ||
+            (message.message != WM_KEYDOWN && message.message != WM_KEYUP &&
+             message.message != WM_SYSKEYDOWN && message.message != WM_SYSKEYUP))
+        {
+            return;
+        }
+
+        const UINT key = static_cast<UINT>(message.wParam);
+        const bool key_down = message.message == WM_KEYDOWN || message.message == WM_SYSKEYDOWN;
+
+        if (key == VK_TAB)
+        {
+            const bool modified = (GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
+                                  (GetKeyState(VK_MENU) & 0x8000) != 0 ||
+                                  (GetKeyState(VK_SHIFT) & 0x8000) != 0 ||
+                                  (GetKeyState(VK_LWIN) & 0x8000) != 0 ||
+                                  (GetKeyState(VK_RWIN) & 0x8000) != 0;
+
+            if (key_down)
+            {
+                if (modified)
+                    return;
+
+                if (!g_input.tab_down)
+                {
+                    finish_active_direction();
+                    static_cast<void>(click_skip_button());
+                    g_input.tab_down = true;
+                }
+                consume_message(message);
+                return;
+            }
+
+            if (g_input.tab_down)
+            {
+                g_input.tab_down = false;
+                consume_message(message);
+            }
+            return;
+        }
+
+        const direction facing = direction_from_key(key);
+        if (facing == direction::none)
+            return;
+        const auto key_bit = static_cast<std::uint8_t>(facing);
+
+        const bool modified = (GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
+                              (GetKeyState(VK_MENU) & 0x8000) != 0;
+
+        if (key_down)
+        {
+            if (modified || !g_input.anchor_valid)
+                return;
+
+            g_input.consumed_direction_keys |= key_bit;
+
+            if (g_input.active_key == 0)
+            {
+                if (!begin_direction_drag(message, key, facing))
+                    g_input.consumed_direction_keys &= static_cast<std::uint8_t>(~key_bit);
+            }
+            else
+            {
+                consume_message(message);
+            }
+            return;
+        }
+
+        if ((g_input.consumed_direction_keys & key_bit) == 0)
+            return;
+
+        g_input.consumed_direction_keys &= static_cast<std::uint8_t>(~key_bit);
+        consume_message(message);
+
+        if (g_input.active_key == key)
+        {
+            if (g_input.target_reached)
+                finish_active_direction();
+            else
+                g_input.key_release_pending = true;
+        }
+    }
+
+    LRESULT CALLBACK get_message_hook(int code, WPARAM wparam, LPARAM lparam)
+    {
+        if (code >= 0 && wparam == PM_REMOVE)
+        {
+            auto *const message = reinterpret_cast<MSG *>(lparam);
+            if (message != nullptr && message->hwnd == g_input.window)
+                process_game_message(*message);
+        }
+
+        return CallNextHookEx(nullptr, code, wparam, lparam);
+    }
+
+    void uninstall_input_hook() noexcept
+    {
+        const HHOOK hook = g_input.message_hook;
+
+        finish_active_direction();
+        if (hook != nullptr)
+            UnhookWindowsHookEx(hook);
+
+        g_input = {};
+        g_reshade_overlay_open.store(false, std::memory_order_relaxed);
+    }
+
+    void on_init_effect_runtime(reshade::api::effect_runtime *runtime)
+    {
+        const auto window = static_cast<HWND>(runtime->get_hwnd());
+        if (window == nullptr)
+            return;
+
+        if (g_input.message_hook != nullptr && g_input.window == window)
+        {
+            g_input.runtime = runtime;
+            return;
+        }
+
+        uninstall_input_hook();
+
+        DWORD process_id = 0;
+        const DWORD thread_id = GetWindowThreadProcessId(window, &process_id);
+        if (thread_id == 0 || process_id != GetCurrentProcessId())
+            return;
+
+        g_input.window = window;
+        g_input.window_thread_id = thread_id;
+        g_input.runtime = runtime;
+        g_input.message_hook = SetWindowsHookExW(WH_GETMESSAGE, get_message_hook, nullptr, thread_id);
+
+        if (g_input.message_hook == nullptr)
+            g_input.message_hook = SetWindowsHookExW(WH_GETMESSAGE, get_message_hook, g_module, thread_id);
+
+        if (g_input.message_hook == nullptr)
+        {
+            g_input = {};
+            return;
+        }
+    }
+
+    void on_destroy_effect_runtime(reshade::api::effect_runtime *runtime)
+    {
+        if (runtime == g_input.runtime)
+            uninstall_input_hook();
+    }
+
+    bool on_reshade_open_overlay(
+        reshade::api::effect_runtime *,
+        bool open,
+        reshade::api::input_source)
+    {
+        g_reshade_overlay_open.store(open, std::memory_order_relaxed);
+        if (open && g_input.window != nullptr)
+            PostMessageW(g_input.window, k_cancel_drag_message, 0, 0);
+        return false;
+    }
+}
+
+extern "C" __declspec(dllexport) const char *NAME = "ArknightsEnhancer";
+extern "C" __declspec(dllexport) const char *AUTHOR = "ItsTheSewerRat";
+extern "C" __declspec(dllexport) const char *DESCRIPTION =
+    "Quality-of-life features for Arknights: set deploy direction of operators "
+    "with WASD and press the Skip button with Tab.";
+
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
+{
+    switch (reason)
+    {
+    case DLL_PROCESS_ATTACH:
+        g_module = module;
+        DisableThreadLibraryCalls(module);
+        if (!reshade::register_addon(module))
+            return FALSE;
+
+        reshade::register_event<reshade::addon_event::init_effect_runtime>(on_init_effect_runtime);
+        reshade::register_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
+        reshade::register_event<reshade::addon_event::reshade_open_overlay>(on_reshade_open_overlay);
+        break;
+
+    case DLL_PROCESS_DETACH:
+        uninstall_input_hook();
+        reshade::unregister_addon(module);
+        break;
+    }
+
+    return TRUE;
+}
