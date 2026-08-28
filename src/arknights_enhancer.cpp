@@ -39,7 +39,7 @@ namespace
 
         UINT active_key = 0;
         std::array<bool, 256> consumed_direction_keys = {};
-        UINT skip_key_down = 0;
+        UINT action_key_down = 0;
         UINT fullscreen_key_down = 0;
     };
 
@@ -98,26 +98,41 @@ namespace
         return point;
     }
 
-    [[nodiscard]] bool click_skip_button() noexcept
+    [[nodiscard]] bool action_shortcut_matches(UINT key) noexcept
     {
-        if (g_input.window == nullptr)
-            return false;
+        return arknights::shortcut_matches(
+                   arknights::shortcut_action::skip,
+                   key) ||
+               arknights::shortcut_matches(
+                   arknights::shortcut_action::gacha_skip,
+                   key) ||
+               arknights::shortcut_matches(
+                   arknights::shortcut_action::confirm_yes,
+                   key);
+    }
 
-        RECT client = {};
-        if (!GetClientRect(g_input.window, &client))
-            return false;
-
-        const LONG width = client.right - client.left;
-        const LONG height = client.bottom - client.top;
-        if (width <= 0 || height <= 0)
-            return false;
-
-        POINT target = {
-            client.left + MulDiv(width, 96, 100),
-            client.top + MulDiv(height, 6, 100),
-        };
-        target = clamp_to_client(target, client);
-        return arknights::click_unity_ui(g_input.window, target);
+    void trigger_context_action(UINT key) noexcept
+    {
+        if (arknights::shortcut_matches(
+                arknights::shortcut_action::confirm_yes,
+                key) &&
+            arknights::trigger_confirm_yes())
+        {
+            return;
+        }
+        if (arknights::shortcut_matches(
+                arknights::shortcut_action::gacha_skip,
+                key) &&
+            arknights::trigger_gacha_skip())
+        {
+            return;
+        }
+        if (arknights::shortcut_matches(
+                arknights::shortcut_action::skip,
+                key))
+        {
+            static_cast<void>(arknights::trigger_skip());
+        }
     }
 
     void clear_active_direction() noexcept
@@ -212,7 +227,7 @@ namespace
         if (message.message == k_cancel_drag_message)
         {
             finish_active_direction();
-            g_input.skip_key_down = 0;
+            g_input.action_key_down = 0;
             g_input.fullscreen_key_down = 0;
             consume_message(message);
             return;
@@ -224,7 +239,7 @@ namespace
             finish_active_direction();
             g_input.tracking_physical_drag = false;
             g_input.anchor_valid = false;
-            g_input.skip_key_down = 0;
+            g_input.action_key_down = 0;
             g_input.fullscreen_key_down = 0;
             return;
         }
@@ -283,9 +298,7 @@ namespace
             return;
         }
 
-        if (arknights::shortcut_matches(
-                arknights::shortcut_action::skip,
-                key))
+        if (action_shortcut_matches(key))
         {
             const bool modified = (GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
                                   (GetKeyState(VK_MENU) & 0x8000) != 0 ||
@@ -298,18 +311,18 @@ namespace
                 if (modified)
                     return;
 
-                if (g_input.skip_key_down == 0)
+                if (g_input.action_key_down == 0)
                 {
                     finish_active_direction();
-                    static_cast<void>(click_skip_button());
-                    g_input.skip_key_down = key;
+                    trigger_context_action(key);
+                    g_input.action_key_down = key;
                 }
                 consume_message(message);
                 return;
             }
 
-            if (g_input.skip_key_down == key)
-                g_input.skip_key_down = 0;
+            if (g_input.action_key_down == key)
+                g_input.action_key_down = 0;
             consume_message(message);
             return;
         }
@@ -510,7 +523,7 @@ extern "C" __declspec(dllexport) const char *NAME = "ArknightsEnhancer";
 extern "C" __declspec(dllexport) const char *AUTHOR = "ItsTheSewerRat";
 extern "C" __declspec(dllexport) const char *DESCRIPTION =
     "Quality-of-life features for Arknights: set deploy direction of operators "
-    "with WASD, press the Skip button with Tab, toggle fullscreen with F12, "
+    "with WASD, control story and gacha skips with Tab, toggle fullscreen with F12, "
     "resize the game window, and control game audio from the title bar.";
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)

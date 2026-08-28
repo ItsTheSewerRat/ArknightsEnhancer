@@ -40,6 +40,8 @@ namespace
         { "Move left", "MoveLeftPrimary", "MoveLeftAlternate", 'A' },
         { "Move right", "MoveRightPrimary", "MoveRightAlternate", 'D' },
         { "Skip", "SkipPrimary", "SkipAlternate", VK_TAB },
+        { "Gacha skip", "GachaSkipPrimary", "GachaSkipAlternate", VK_TAB },
+        { "Confirm (Yes)", "ConfirmYesPrimary", "ConfirmYesAlternate", VK_TAB },
         { "Fullscreen", "FullscreenPrimary", "FullscreenAlternate", VK_F12 },
     };
 

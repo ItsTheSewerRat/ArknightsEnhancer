@@ -95,7 +95,9 @@ namespace
         const MethodInfo *get_character_dialog_typing = nullptr;
         const MethodInfo *finish_character_dialog_text = nullptr;
 
-        skip_binding skips[6] = {};
+        skip_binding skips[3] = {};
+        skip_binding gacha_skips[3] = {};
+        skip_binding confirm_yes = {};
         bool ready = false;
     };
 
@@ -477,19 +479,25 @@ namespace
             "GachaPhase0",
             "OnSkipAllBtnClicked",
             "get_canSkip",
-            value.skips[3]));
+            value.gacha_skips[0]));
         static_cast<void>(bind_skip_with_availability(
             "Torappu.Gacha",
             "GachaPhase1",
             "OnSkipAllBtnClicked",
             "get_canSkip",
-            value.skips[4]));
+            value.gacha_skips[1]));
         static_cast<void>(bind_skip_with_availability(
             "Torappu.Gacha",
             "GachaController",
             "OnMaskClicked",
             "get_isRunning",
-            value.skips[5]));
+            value.gacha_skips[2]));
+        static_cast<void>(bind_skip_with_availability(
+            "Torappu.AVG",
+            "SkipBriefPanel",
+            "OnConfirmBtnClicked",
+            "get_isShown",
+            value.confirm_yes));
 
         value.ready = true;
         g_game = value;
@@ -646,16 +654,14 @@ namespace
                active;
     }
 
-    [[nodiscard]] bool invoke_skip() noexcept
+    [[nodiscard]] bool invoke_skip_candidates(
+        const skip_binding *bindings,
+        std::size_t count,
+        const char *action_name) noexcept
     {
-        if (skip_active_character_dialog())
-            return true;
-
-        for (std::size_t index = 0;
-             index < _countof(g_game.skips);
-             ++index)
+        for (std::size_t index = 0; index < count; ++index)
         {
-            const skip_binding &binding = g_game.skips[index];
+            const skip_binding &binding = bindings[index];
             if (binding.owner_class == nullptr)
                 continue;
 
@@ -689,19 +695,45 @@ namespace
                 continue;
             }
 
-            g_stage = "invoke concrete Skip handler";
+            g_stage = action_name;
             if (invoke(binding.action, owner, nullptr))
             {
-                char message[96] = {};
+                char message[128] = {};
                 sprintf_s(
                     message,
-                    "ArknightsEnhancer Skip invoked candidate %zu.",
+                    "ArknightsEnhancer %s invoked candidate %zu.",
+                    action_name,
                     index);
                 log_result(message);
                 return true;
             }
         }
         return false;
+    }
+
+    [[nodiscard]] bool invoke_skip() noexcept
+    {
+        return invoke_skip_candidates(
+            g_game.skips,
+            _countof(g_game.skips),
+            "Skip");
+    }
+
+    [[nodiscard]] bool invoke_gacha_skip() noexcept
+    {
+        return skip_active_character_dialog() ||
+               invoke_skip_candidates(
+                   g_game.gacha_skips,
+                   _countof(g_game.gacha_skips),
+                   "Gacha skip");
+    }
+
+    [[nodiscard]] bool invoke_confirm_yes() noexcept
+    {
+        return invoke_skip_candidates(
+            &g_game.confirm_yes,
+            1,
+            "Confirm Yes");
     }
 
     [[nodiscard]] bool invoke_direction(
@@ -775,14 +807,38 @@ namespace arknights
         }
     }
 
-    bool click_unity_ui(HWND window, POINT target_client) noexcept
+    bool trigger_skip() noexcept
     {
-        static_cast<void>(window);
-        static_cast<void>(target_client);
         __try
         {
             g_stage = "start concrete Skip";
             return initialize_bindings() && invoke_skip();
+        }
+        __except (log_native_exception(GetExceptionCode()))
+        {
+            return false;
+        }
+    }
+
+    bool trigger_gacha_skip() noexcept
+    {
+        __try
+        {
+            g_stage = "start concrete Gacha skip";
+            return initialize_bindings() && invoke_gacha_skip();
+        }
+        __except (log_native_exception(GetExceptionCode()))
+        {
+            return false;
+        }
+    }
+
+    bool trigger_confirm_yes() noexcept
+    {
+        __try
+        {
+            g_stage = "start concrete Confirm Yes";
+            return initialize_bindings() && invoke_confirm_yes();
         }
         __except (log_native_exception(GetExceptionCode()))
         {

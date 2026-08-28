@@ -16,6 +16,8 @@ namespace arknights
         move_left,
         move_right,
         skip,
+        gacha_skip,
+        confirm_yes,
         fullscreen,
         count,
     };
