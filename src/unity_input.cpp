@@ -90,6 +90,11 @@ namespace
         const MethodInfo *direction_hover = nullptr;
         const MethodInfo *direction_click = nullptr;
 
+        Il2CppClass *character_dialog = nullptr;
+        const Il2CppFieldInfo *character_dialog_text = nullptr;
+        const MethodInfo *get_character_dialog_typing = nullptr;
+        const MethodInfo *finish_character_dialog_text = nullptr;
+
         skip_binding skips[6] = {};
         bool ready = false;
     };
@@ -374,6 +379,12 @@ namespace
         value.direction_selector = find_class(
             "Torappu.Battle.UI",
             "UIDirectionSelector");
+        value.character_dialog = find_class(
+            "Torappu.Gacha",
+            "PanelCharacterDialog");
+        Il2CppClass *const typewriter = find_class(
+            "Torappu.AVG",
+            "AVGTypeWriterText");
         if (value.unity_object == nullptr ||
             component == nullptr ||
             game_object == nullptr ||
@@ -412,6 +423,24 @@ namespace
                 value.direction_selector,
                 "OnDirectionClicked",
                 0);
+        if (value.character_dialog != nullptr &&
+            typewriter != nullptr)
+        {
+            value.character_dialog_text =
+                g_api.class_get_field_from_name(
+                    value.character_dialog,
+                    "_text");
+            value.get_character_dialog_typing =
+                g_api.class_get_method_from_name(
+                    typewriter,
+                    "get_isTyping",
+                    0);
+            value.finish_character_dialog_text =
+                g_api.class_get_method_from_name(
+                    typewriter,
+                    "TryFinish",
+                    0);
+        }
         if (value.find_object_of_type == nullptr ||
             value.component_game_object == nullptr ||
             value.get_active_in_hierarchy == nullptr ||
@@ -530,6 +559,57 @@ namespace
                active;
     }
 
+    [[nodiscard]] bool skip_active_character_dialog() noexcept
+    {
+        if (g_game.character_dialog == nullptr ||
+            g_game.character_dialog_text == nullptr ||
+            g_game.get_character_dialog_typing == nullptr ||
+            g_game.finish_character_dialog_text == nullptr)
+        {
+            return false;
+        }
+
+        Il2CppObject *const dialog =
+            find_live_object(g_game.character_dialog);
+        if (dialog == nullptr || !is_component_active(dialog))
+            return false;
+
+        Il2CppObject *typewriter = nullptr;
+        g_api.field_get_value(
+            dialog,
+            g_game.character_dialog_text,
+            &typewriter);
+        if (typewriter == nullptr)
+            return false;
+
+        Il2CppObject *typing_value = nullptr;
+        bool is_typing = false;
+        if (!invoke(
+                g_game.get_character_dialog_typing,
+                typewriter,
+                nullptr,
+                &typing_value) ||
+            typing_value == nullptr ||
+            !unbox_bool(typing_value, is_typing) ||
+            !is_typing)
+        {
+            return false;
+        }
+
+        g_stage = "finish active gacha character text";
+        if (!invoke(
+                g_game.finish_character_dialog_text,
+                typewriter,
+                nullptr))
+        {
+            return false;
+        }
+
+        log_result(
+            "ArknightsEnhancer finished the active gacha character text.");
+        return true;
+    }
+
     [[nodiscard]] bool is_button_active(
         Il2CppObject *owner,
         const skip_binding &binding) noexcept
@@ -568,6 +648,9 @@ namespace
 
     [[nodiscard]] bool invoke_skip() noexcept
     {
+        if (skip_active_character_dialog())
+            return true;
+
         for (std::size_t index = 0;
              index < _countof(g_game.skips);
              ++index)
