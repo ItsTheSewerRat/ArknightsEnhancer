@@ -8,7 +8,8 @@ A 64-bit ReShade add-on with quality-of-life features for the official Arknights
 - Press the in-game **Skip** button with **Tab**.
 - Toggle between windowed and fullscreen with **F12**.
 - Resize the window with a corner grip. The minimum client height is 480 px.
-- Control Arknights audio from the title bar with a mute button, volume slider, or mouse wheel.
+- Control only Arknights audio from the title bar with a mute button, volume slider, or mouse wheel.
+- Configure a primary and alternate key for every shortcut from the **ArknightsEnhancer** ReShade window. Left-click a key field and press a key to bind it, or right-click the field to unbind it.
 
 The add-on uses Windows and ReShade APIs. It does not read or modify Unity game memory.
 

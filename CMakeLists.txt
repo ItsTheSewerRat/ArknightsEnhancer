@@ -10,8 +10,15 @@ if(NOT EXISTS "${RESHADE_SDK_DIR}/include/reshade.hpp")
         "Run build.ps1 to download the matching SDK automatically.")
 endif()
 
+if(NOT EXISTS "${RESHADE_SDK_DIR}/deps/imgui/imgui.h")
+    message(FATAL_ERROR
+        "The ReShade ImGui submodule is missing. "
+        "Run build.ps1 to download it automatically.")
+endif()
+
 add_library(ArknightsEnhancer SHARED
     src/arknights_enhancer.cpp
+    src/shortcut_settings.cpp
     src/window_enhancements.cpp
 )
 
@@ -21,9 +28,16 @@ target_compile_definitions(ArknightsEnhancer PRIVATE
     NOMINMAX
     UNICODE
     _UNICODE
+    ImTextureID=ImU64
+    IMGUI_USER_CONFIG="../imgui_config.hpp"
+    IMGUI_DEFINE_MATH_OPERATORS
+    IMGUI_DISABLE_OBSOLETE_FUNCTIONS
+    IMGUI_DISABLE_FILE_FUNCTIONS
+    IMGUI_DISABLE_WIN32_DEFAULT_IME_FUNCTIONS
 )
 target_include_directories(ArknightsEnhancer SYSTEM PRIVATE
     "${RESHADE_SDK_DIR}/include"
+    "${RESHADE_SDK_DIR}/deps/imgui"
 )
 target_link_libraries(ArknightsEnhancer PRIVATE
     dwmapi

@@ -3,10 +3,13 @@
 #include <windows.h>
 #include <windowsx.h>
 
+#include <imgui.h>
 #include <reshade.hpp>
 
+#include "shortcut_settings.hpp"
 #include "window_enhancements.hpp"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -44,9 +47,9 @@ namespace
         bool injected_button_down = false;
         bool target_reached = false;
         bool key_release_pending = false;
-        std::uint8_t consumed_direction_keys = 0;
-        bool tab_down = false;
-        bool fullscreen_key_down = false;
+        std::array<bool, 256> consumed_direction_keys = {};
+        UINT skip_key_down = 0;
+        UINT fullscreen_key_down = 0;
     };
 
     input_state g_input;
@@ -64,14 +67,23 @@ namespace
 
     [[nodiscard]] direction direction_from_key(UINT key) noexcept
     {
-        switch (key)
-        {
-        case 'W': return direction::up;
-        case 'S': return direction::down;
-        case 'A': return direction::left;
-        case 'D': return direction::right;
-        default: return direction::none;
-        }
+        if (arknights::shortcut_matches(
+                arknights::shortcut_action::move_up,
+                key))
+            return direction::up;
+        if (arknights::shortcut_matches(
+                arknights::shortcut_action::move_down,
+                key))
+            return direction::down;
+        if (arknights::shortcut_matches(
+                arknights::shortcut_action::move_left,
+                key))
+            return direction::left;
+        if (arknights::shortcut_matches(
+                arknights::shortcut_action::move_right,
+                key))
+            return direction::right;
+        return direction::none;
     }
 
     [[nodiscard]] POINT point_from_message(LPARAM value) noexcept
@@ -215,7 +227,7 @@ namespace
         g_input.injected_button_down = false;
         g_input.target_reached = false;
         g_input.key_release_pending = false;
-        g_input.consumed_direction_keys = 0;
+        g_input.consumed_direction_keys.fill(false);
     }
 
     void finish_active_direction() noexcept
@@ -353,8 +365,8 @@ namespace
         if (message.message == k_cancel_drag_message)
         {
             finish_active_direction();
-            g_input.tab_down = false;
-            g_input.fullscreen_key_down = false;
+            g_input.skip_key_down = 0;
+            g_input.fullscreen_key_down = 0;
             consume_message(message);
             return;
         }
@@ -365,8 +377,8 @@ namespace
             finish_active_direction();
             g_input.tracking_physical_drag = false;
             g_input.anchor_valid = false;
-            g_input.tab_down = false;
-            g_input.fullscreen_key_down = false;
+            g_input.skip_key_down = 0;
+            g_input.fullscreen_key_down = 0;
             return;
         }
 
@@ -399,7 +411,9 @@ namespace
         const UINT key = static_cast<UINT>(message.wParam);
         const bool key_down = message.message == WM_KEYDOWN || message.message == WM_SYSKEYDOWN;
 
-        if (key == VK_F12)
+        if (arknights::shortcut_matches(
+                arknights::shortcut_action::fullscreen,
+                key))
         {
             const bool modified = (GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
                                   (GetKeyState(VK_MENU) & 0x8000) != 0 ||
@@ -412,25 +426,27 @@ namespace
                 if (modified)
                     return;
 
-                if (!g_input.fullscreen_key_down)
+                if (g_input.fullscreen_key_down == 0)
                 {
                     finish_active_direction();
+                    arknights::preserve_overlay_scale_after_resize(
+                        g_input.window);
                     arknights::toggle_game_fullscreen(g_input.window);
-                    g_input.fullscreen_key_down = true;
+                    g_input.fullscreen_key_down = key;
                 }
                 consume_message(message);
                 return;
             }
 
-            if (g_input.fullscreen_key_down)
-            {
-                g_input.fullscreen_key_down = false;
-                consume_message(message);
-            }
+            if (g_input.fullscreen_key_down == key)
+                g_input.fullscreen_key_down = 0;
+            consume_message(message);
             return;
         }
 
-        if (key == VK_TAB)
+        if (arknights::shortcut_matches(
+                arknights::shortcut_action::skip,
+                key))
         {
             const bool modified = (GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
                                   (GetKeyState(VK_MENU) & 0x8000) != 0 ||
@@ -443,28 +459,27 @@ namespace
                 if (modified)
                     return;
 
-                if (!g_input.tab_down)
+                if (g_input.skip_key_down == 0)
                 {
                     finish_active_direction();
                     static_cast<void>(click_skip_button());
-                    g_input.tab_down = true;
+                    g_input.skip_key_down = key;
                 }
                 consume_message(message);
                 return;
             }
 
-            if (g_input.tab_down)
-            {
-                g_input.tab_down = false;
-                consume_message(message);
-            }
+            if (g_input.skip_key_down == key)
+                g_input.skip_key_down = 0;
+            consume_message(message);
             return;
         }
 
         const direction facing = direction_from_key(key);
         if (facing == direction::none)
             return;
-        const auto key_bit = static_cast<std::uint8_t>(facing);
+        if (key >= g_input.consumed_direction_keys.size())
+            return;
 
         const bool modified = (GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
                               (GetKeyState(VK_MENU) & 0x8000) != 0;
@@ -474,12 +489,12 @@ namespace
             if (modified || !g_input.anchor_valid)
                 return;
 
-            g_input.consumed_direction_keys |= key_bit;
+            g_input.consumed_direction_keys[key] = true;
 
             if (g_input.active_key == 0)
             {
                 if (!begin_direction_drag(message, key, facing))
-                    g_input.consumed_direction_keys &= static_cast<std::uint8_t>(~key_bit);
+                    g_input.consumed_direction_keys[key] = false;
             }
             else
             {
@@ -488,10 +503,10 @@ namespace
             return;
         }
 
-        if ((g_input.consumed_direction_keys & key_bit) == 0)
+        if (!g_input.consumed_direction_keys[key])
             return;
 
-        g_input.consumed_direction_keys &= static_cast<std::uint8_t>(~key_bit);
+        g_input.consumed_direction_keys[key] = false;
         consume_message(message);
 
         if (g_input.active_key == key)
@@ -648,6 +663,8 @@ namespace
         reshade::api::input_source)
     {
         g_reshade_overlay_open.store(open, std::memory_order_relaxed);
+        if (!open)
+            arknights::cancel_shortcut_capture();
         if (open && g_input.window != nullptr)
             PostMessageW(g_input.window, k_cancel_drag_message, 0, 0);
         return false;
@@ -671,6 +688,10 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         if (!reshade::register_addon(module))
             return FALSE;
 
+        arknights::load_shortcut_settings();
+        reshade::register_overlay(
+            "ArknightsEnhancer",
+            arknights::draw_shortcut_settings);
         reshade::register_event<reshade::addon_event::init_effect_runtime>(on_init_effect_runtime);
         reshade::register_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
         reshade::register_event<reshade::addon_event::reshade_present>(on_reshade_present);

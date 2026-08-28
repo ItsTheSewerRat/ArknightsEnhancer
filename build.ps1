@@ -28,6 +28,15 @@ if (-not (Test-Path -LiteralPath (Join-Path $ReShadeSdkDir "include\reshade.hpp"
     }
 }
 
+$imguiHeader = Join-Path $ReShadeSdkDir "deps\imgui\imgui.h"
+if (-not (Test-Path -LiteralPath $imguiHeader)) {
+    Write-Host "Downloading the ReShade ImGui dependency..."
+    & git -C $ReShadeSdkDir submodule update --init --depth 1 deps/imgui
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to download the ReShade ImGui dependency."
+    }
+}
+
 $cmakeCommand = Get-Command cmake -ErrorAction SilentlyContinue
 if ($null -eq $cmakeCommand) {
     $vswherePath = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
