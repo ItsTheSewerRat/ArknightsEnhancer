@@ -69,7 +69,7 @@ namespace
         bool loaded = false;
     };
 
-    struct skip_binding
+    struct ui_action_binding
     {
         Il2CppClass *owner_class = nullptr;
         const MethodInfo *action = nullptr;
@@ -95,9 +95,20 @@ namespace
         const MethodInfo *get_character_dialog_typing = nullptr;
         const MethodInfo *finish_character_dialog_text = nullptr;
 
-        skip_binding skips[3] = {};
-        skip_binding gacha_skips[3] = {};
-        skip_binding confirm_yes = {};
+        Il2CppClass *story_controller = nullptr;
+        const MethodInfo *story_is_running = nullptr;
+        const Il2CppFieldInfo *story_hide_mask = nullptr;
+        const MethodInfo *story_hide = nullptr;
+        const MethodInfo *story_show = nullptr;
+
+        ui_action_binding skips[3] = {};
+        ui_action_binding gacha_skips[3] = {};
+        ui_action_binding confirm_yes = {};
+        ui_action_binding story_auto = {};
+        ui_action_binding story_auto_speed = {};
+        ui_action_binding story_continue = {};
+        ui_action_binding story_history_open = {};
+        ui_action_binding story_history_close = {};
         bool ready = false;
     };
 
@@ -274,13 +285,13 @@ namespace
         return true;
     }
 
-    [[nodiscard]] bool bind_skip(
+    [[nodiscard]] bool bind_ui_action(
         const char *name_space,
         const char *class_name,
         const char *method_name,
         const char *button_field,
         bool button_is_component,
-        skip_binding &binding) noexcept
+        ui_action_binding &binding) noexcept
     {
         binding.owner_class = find_class(name_space, class_name);
         if (binding.owner_class == nullptr)
@@ -298,12 +309,12 @@ namespace
                binding.button_field != nullptr;
     }
 
-    [[nodiscard]] bool bind_skip_with_availability(
+    [[nodiscard]] bool bind_ui_action_with_availability(
         const char *name_space,
         const char *class_name,
         const char *method_name,
         const char *availability_method,
-        skip_binding &binding) noexcept
+        ui_action_binding &binding) noexcept
     {
         binding.owner_class = find_class(name_space, class_name);
         if (binding.owner_class == nullptr)
@@ -384,6 +395,9 @@ namespace
         value.character_dialog = find_class(
             "Torappu.Gacha",
             "PanelCharacterDialog");
+        value.story_controller = find_class(
+            "Torappu.AVG",
+            "AVGController");
         Il2CppClass *const typewriter = find_class(
             "Torappu.AVG",
             "AVGTypeWriterText");
@@ -443,6 +457,28 @@ namespace
                     "TryFinish",
                     0);
         }
+        if (value.story_controller != nullptr)
+        {
+            value.story_is_running =
+                g_api.class_get_method_from_name(
+                    value.story_controller,
+                    "get_isRunning",
+                    0);
+            value.story_hide_mask =
+                g_api.class_get_field_from_name(
+                    value.story_controller,
+                    "_hideUiMask");
+            value.story_hide =
+                g_api.class_get_method_from_name(
+                    value.story_controller,
+                    "OnHideuiBtnClicked",
+                    0);
+            value.story_show =
+                g_api.class_get_method_from_name(
+                    value.story_controller,
+                    "OnHideuiResumeClicked",
+                    0);
+        }
         if (value.find_object_of_type == nullptr ||
             value.component_game_object == nullptr ||
             value.get_active_in_hierarchy == nullptr ||
@@ -453,51 +489,84 @@ namespace
             return false;
         }
 
-        static_cast<void>(bind_skip(
+        static_cast<void>(bind_ui_action(
             "Torappu.Battle.Dialog",
             "DialogPanel",
             "OnSkipClicked",
             "_skipButton",
             true,
             value.skips[0]));
-        static_cast<void>(bind_skip(
+        static_cast<void>(bind_ui_action(
             "Torappu.AVG",
             "AVGController",
             "OnSkipBtnClicked",
             "_skipBtn",
             false,
             value.skips[1]));
-        static_cast<void>(bind_skip(
+        static_cast<void>(bind_ui_action(
             "Torappu.Battle.UI.Cooperate",
             "UICooperateRestingPanel",
             "OnSkipButtonClick",
             "_skipButton",
             true,
             value.skips[2]));
-        static_cast<void>(bind_skip_with_availability(
+        static_cast<void>(bind_ui_action_with_availability(
             "Torappu.Gacha",
             "GachaPhase0",
             "OnSkipAllBtnClicked",
             "get_canSkip",
             value.gacha_skips[0]));
-        static_cast<void>(bind_skip_with_availability(
+        static_cast<void>(bind_ui_action_with_availability(
             "Torappu.Gacha",
             "GachaPhase1",
             "OnSkipAllBtnClicked",
             "get_canSkip",
             value.gacha_skips[1]));
-        static_cast<void>(bind_skip_with_availability(
+        static_cast<void>(bind_ui_action_with_availability(
             "Torappu.Gacha",
             "GachaController",
             "OnMaskClicked",
             "get_isRunning",
             value.gacha_skips[2]));
-        static_cast<void>(bind_skip_with_availability(
+        static_cast<void>(bind_ui_action_with_availability(
             "Torappu.AVG",
             "SkipBriefPanel",
             "OnConfirmBtnClicked",
             "get_isShown",
             value.confirm_yes));
+        static_cast<void>(bind_ui_action(
+            "Torappu.AVG",
+            "AVGController",
+            "OnAutoBtnClicked",
+            "_autoBtn",
+            true,
+            value.story_auto));
+        static_cast<void>(bind_ui_action(
+            "Torappu.AVG",
+            "AVGController",
+            "OnSpeedBtnClicked",
+            "_speedBtn",
+            false,
+            value.story_auto_speed));
+        static_cast<void>(bind_ui_action(
+            "Torappu.AVG",
+            "AVGController",
+            "OnClickPress",
+            "_clickBtn",
+            true,
+            value.story_continue));
+        static_cast<void>(bind_ui_action_with_availability(
+            "Torappu.AVG",
+            "AVGController",
+            "OnPlaybackBtnClicked",
+            "get_isRunning",
+            value.story_history_open));
+        static_cast<void>(bind_ui_action_with_availability(
+            "Torappu.AVG",
+            "PlaybackPanel",
+            "OnCloseBtnClicked",
+            "get_isShown",
+            value.story_history_close));
 
         value.ready = true;
         g_game = value;
@@ -541,6 +610,22 @@ namespace
         return true;
     }
 
+    [[nodiscard]] bool is_game_object_active(
+        Il2CppObject *game_object) noexcept
+    {
+        Il2CppObject *active_value = nullptr;
+        bool active = false;
+        return game_object != nullptr &&
+               invoke(
+                   g_game.get_active_in_hierarchy,
+                   game_object,
+                   nullptr,
+                   &active_value) &&
+               active_value != nullptr &&
+               unbox_bool(active_value, active) &&
+               active;
+    }
+
     [[nodiscard]] bool is_component_active(
         Il2CppObject *component) noexcept
     {
@@ -555,16 +640,7 @@ namespace
             return false;
         }
 
-        Il2CppObject *active_value = nullptr;
-        bool active = false;
-        return invoke(
-                   g_game.get_active_in_hierarchy,
-                   game_object,
-                   nullptr,
-                   &active_value) &&
-               active_value != nullptr &&
-               unbox_bool(active_value, active) &&
-               active;
+        return is_game_object_active(game_object);
     }
 
     [[nodiscard]] bool skip_active_character_dialog() noexcept
@@ -620,7 +696,7 @@ namespace
 
     [[nodiscard]] bool is_button_active(
         Il2CppObject *owner,
-        const skip_binding &binding) noexcept
+        const ui_action_binding &binding) noexcept
     {
         Il2CppObject *button = nullptr;
         g_api.field_get_value(
@@ -642,26 +718,17 @@ namespace
             return false;
         }
 
-        Il2CppObject *active_value = nullptr;
-        bool active = false;
-        return invoke(
-                   g_game.get_active_in_hierarchy,
-                   game_object,
-                   nullptr,
-                   &active_value) &&
-               active_value != nullptr &&
-               unbox_bool(active_value, active) &&
-               active;
+        return is_game_object_active(game_object);
     }
 
-    [[nodiscard]] bool invoke_skip_candidates(
-        const skip_binding *bindings,
+    [[nodiscard]] bool invoke_ui_action_candidates(
+        const ui_action_binding *bindings,
         std::size_t count,
         const char *action_name) noexcept
     {
         for (std::size_t index = 0; index < count; ++index)
         {
-            const skip_binding &binding = bindings[index];
+            const ui_action_binding &binding = bindings[index];
             if (binding.owner_class == nullptr)
                 continue;
 
@@ -713,7 +780,7 @@ namespace
 
     [[nodiscard]] bool invoke_skip() noexcept
     {
-        return invoke_skip_candidates(
+        return invoke_ui_action_candidates(
             g_game.skips,
             _countof(g_game.skips),
             "Skip");
@@ -722,7 +789,7 @@ namespace
     [[nodiscard]] bool invoke_gacha_skip() noexcept
     {
         return skip_active_character_dialog() ||
-               invoke_skip_candidates(
+               invoke_ui_action_candidates(
                    g_game.gacha_skips,
                    _countof(g_game.gacha_skips),
                    "Gacha skip");
@@ -730,10 +797,95 @@ namespace
 
     [[nodiscard]] bool invoke_confirm_yes() noexcept
     {
-        return invoke_skip_candidates(
+        return invoke_ui_action_candidates(
             &g_game.confirm_yes,
             1,
             "Confirm Yes");
+    }
+
+    [[nodiscard]] bool invoke_story_hide_ui() noexcept
+    {
+        if (g_game.story_controller == nullptr ||
+            g_game.story_is_running == nullptr ||
+            g_game.story_hide_mask == nullptr ||
+            g_game.story_hide == nullptr ||
+            g_game.story_show == nullptr)
+        {
+            return false;
+        }
+
+        Il2CppObject *const controller =
+            find_live_object(g_game.story_controller);
+        if (controller == nullptr || !is_component_active(controller))
+            return false;
+
+        Il2CppObject *running_value = nullptr;
+        bool running = false;
+        if (!invoke(
+                g_game.story_is_running,
+                controller,
+                nullptr,
+                &running_value) ||
+            running_value == nullptr ||
+            !unbox_bool(running_value, running) ||
+            !running)
+        {
+            return false;
+        }
+
+        Il2CppObject *hide_mask = nullptr;
+        g_api.field_get_value(
+            controller,
+            g_game.story_hide_mask,
+            &hide_mask);
+        const bool hidden = is_game_object_active(hide_mask);
+
+        g_stage = hidden ? "show story UI" : "hide story UI";
+        const bool invoked = invoke(
+            hidden ? g_game.story_show : g_game.story_hide,
+            controller,
+            nullptr);
+        log_result(
+            invoked
+                ? "ArknightsEnhancer toggled the story UI."
+                : "ArknightsEnhancer failed to toggle the story UI.");
+        return invoked;
+    }
+
+    [[nodiscard]] bool invoke_story_auto() noexcept
+    {
+        return invoke_ui_action_candidates(
+            &g_game.story_auto,
+            1,
+            "Story Auto");
+    }
+
+    [[nodiscard]] bool invoke_story_auto_speed() noexcept
+    {
+        return invoke_ui_action_candidates(
+            &g_game.story_auto_speed,
+            1,
+            "Story Auto speed");
+    }
+
+    [[nodiscard]] bool invoke_story_continue() noexcept
+    {
+        return invoke_ui_action_candidates(
+            &g_game.story_continue,
+            1,
+            "Story continue");
+    }
+
+    [[nodiscard]] bool invoke_story_history() noexcept
+    {
+        return invoke_ui_action_candidates(
+                   &g_game.story_history_close,
+                   1,
+                   "Close story history") ||
+               invoke_ui_action_candidates(
+                   &g_game.story_history_open,
+                   1,
+                   "Open story history");
     }
 
     [[nodiscard]] bool invoke_direction(
@@ -839,6 +991,71 @@ namespace arknights
         {
             g_stage = "start concrete Confirm Yes";
             return initialize_bindings() && invoke_confirm_yes();
+        }
+        __except (log_native_exception(GetExceptionCode()))
+        {
+            return false;
+        }
+    }
+
+    bool trigger_story_hide_ui() noexcept
+    {
+        __try
+        {
+            g_stage = "start story UI toggle";
+            return initialize_bindings() && invoke_story_hide_ui();
+        }
+        __except (log_native_exception(GetExceptionCode()))
+        {
+            return false;
+        }
+    }
+
+    bool trigger_story_auto() noexcept
+    {
+        __try
+        {
+            g_stage = "start story Auto toggle";
+            return initialize_bindings() && invoke_story_auto();
+        }
+        __except (log_native_exception(GetExceptionCode()))
+        {
+            return false;
+        }
+    }
+
+    bool trigger_story_auto_speed() noexcept
+    {
+        __try
+        {
+            g_stage = "start story Auto speed";
+            return initialize_bindings() && invoke_story_auto_speed();
+        }
+        __except (log_native_exception(GetExceptionCode()))
+        {
+            return false;
+        }
+    }
+
+    bool trigger_story_continue() noexcept
+    {
+        __try
+        {
+            g_stage = "start story continue";
+            return initialize_bindings() && invoke_story_continue();
+        }
+        __except (log_native_exception(GetExceptionCode()))
+        {
+            return false;
+        }
+    }
+
+    bool trigger_story_history() noexcept
+    {
+        __try
+        {
+            g_stage = "start story history";
+            return initialize_bindings() && invoke_story_history();
         }
         __except (log_native_exception(GetExceptionCode()))
         {

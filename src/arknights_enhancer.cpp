@@ -108,31 +108,79 @@ namespace
                    key) ||
                arknights::shortcut_matches(
                    arknights::shortcut_action::confirm_yes,
+                   key) ||
+               arknights::shortcut_matches(
+                   arknights::shortcut_action::story_hide_ui,
+                   key) ||
+               arknights::shortcut_matches(
+                   arknights::shortcut_action::story_auto,
+                   key) ||
+               arknights::shortcut_matches(
+                   arknights::shortcut_action::story_auto_speed,
+                   key) ||
+               arknights::shortcut_matches(
+                   arknights::shortcut_action::story_continue,
+                   key) ||
+               arknights::shortcut_matches(
+                   arknights::shortcut_action::story_history,
                    key);
     }
 
-    void trigger_context_action(UINT key) noexcept
+    [[nodiscard]] bool trigger_context_action(UINT key) noexcept
     {
         if (arknights::shortcut_matches(
                 arknights::shortcut_action::confirm_yes,
                 key) &&
             arknights::trigger_confirm_yes())
         {
-            return;
+            return true;
         }
         if (arknights::shortcut_matches(
                 arknights::shortcut_action::gacha_skip,
                 key) &&
             arknights::trigger_gacha_skip())
         {
-            return;
+            return true;
         }
         if (arknights::shortcut_matches(
                 arknights::shortcut_action::skip,
-                key))
+                key) &&
+            arknights::trigger_skip())
         {
-            static_cast<void>(arknights::trigger_skip());
+            return true;
         }
+        if (arknights::shortcut_matches(
+                arknights::shortcut_action::story_hide_ui,
+                key) &&
+            arknights::trigger_story_hide_ui())
+        {
+            return true;
+        }
+        if (arknights::shortcut_matches(
+                arknights::shortcut_action::story_auto,
+                key) &&
+            arknights::trigger_story_auto())
+        {
+            return true;
+        }
+        if (arknights::shortcut_matches(
+                arknights::shortcut_action::story_auto_speed,
+                key) &&
+            arknights::trigger_story_auto_speed())
+        {
+            return true;
+        }
+        if (arknights::shortcut_matches(
+                arknights::shortcut_action::story_continue,
+                key) &&
+            arknights::trigger_story_continue())
+        {
+            return true;
+        }
+        return arknights::shortcut_matches(
+                arknights::shortcut_action::story_history,
+                key) &&
+               arknights::trigger_story_history();
     }
 
     void clear_active_direction() noexcept
@@ -314,15 +362,17 @@ namespace
                 if (g_input.action_key_down == 0)
                 {
                     finish_active_direction();
-                    trigger_context_action(key);
+                    if (!trigger_context_action(key))
+                        return;
                     g_input.action_key_down = key;
                 }
                 consume_message(message);
                 return;
             }
 
-            if (g_input.action_key_down == key)
-                g_input.action_key_down = 0;
+            if (g_input.action_key_down != key)
+                return;
+            g_input.action_key_down = 0;
             consume_message(message);
             return;
         }

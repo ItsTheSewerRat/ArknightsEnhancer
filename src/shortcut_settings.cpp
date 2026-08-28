@@ -42,6 +42,11 @@ namespace
         { "Skip", "SkipPrimary", "SkipAlternate", VK_TAB },
         { "Gacha skip", "GachaSkipPrimary", "GachaSkipAlternate", VK_TAB },
         { "Confirm (Yes)", "ConfirmYesPrimary", "ConfirmYesAlternate", VK_TAB },
+        { "Story hide/show", "StoryHideUiPrimary", "StoryHideUiAlternate", VK_SPACE },
+        { "Story Auto", "StoryAutoPrimary", "StoryAutoAlternate", 'P' },
+        { "Story Auto speed", "StoryAutoSpeedPrimary", "StoryAutoSpeedAlternate", 'O' },
+        { "Story continue", "StoryContinuePrimary", "StoryContinueAlternate", VK_RETURN },
+        { "Story history", "StoryHistoryPrimary", "StoryHistoryAlternate", 'H' },
         { "Fullscreen", "FullscreenPrimary", "FullscreenAlternate", VK_F12 },
     };
 

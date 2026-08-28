@@ -18,6 +18,11 @@ namespace arknights
         skip,
         gacha_skip,
         confirm_yes,
+        story_hide_ui,
+        story_auto,
+        story_auto_speed,
+        story_continue,
+        story_history,
         fullscreen,
         count,
     };
