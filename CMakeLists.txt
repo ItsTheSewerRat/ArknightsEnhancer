@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(ArknightsEnhancer VERSION 1.1.2 LANGUAGES CXX)
+project(ArknightsEnhancer VERSION 1.2.0 LANGUAGES CXX)
 
 set(RESHADE_SDK_DIR "" CACHE PATH "Path to a ReShade 6.7.3 source tree")
 
