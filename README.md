@@ -11,7 +11,7 @@ A 64-bit ReShade add-on with quality-of-life features for the official Arknights
 - Control only Arknights audio from the title bar with a mute button, volume slider, or mouse wheel.
 - Configure a primary and alternate key for every shortcut from the **ArknightsEnhancer** ReShade window. Left-click a key field and press a key to bind it, or right-click the field to unbind it.
 
-The add-on uses Windows and ReShade APIs. It does not read or modify Unity game memory.
+The add-on uses Windows, ReShade, and the game's existing Unity UI handlers.
 
 ## Requirements
 

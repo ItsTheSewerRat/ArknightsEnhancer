@@ -19,6 +19,7 @@ endif()
 add_library(ArknightsEnhancer SHARED
     src/arknights_enhancer.cpp
     src/shortcut_settings.cpp
+    src/unity_input.cpp
     src/window_enhancements.cpp
 )
 

@@ -7,6 +7,7 @@
 #include <reshade.hpp>
 
 #include "shortcut_settings.hpp"
+#include "unity_input.hpp"
 #include "window_enhancements.hpp"
 
 #include <array>
@@ -16,12 +17,8 @@
 
 namespace
 {
-    constexpr UINT_PTR k_drag_timer_id =
-        static_cast<UINT_PTR>(UINT64_C(0x41574B4457415344));
     constexpr UINT k_cancel_drag_message = WM_APP + 0x5A1;
-    constexpr UINT k_drag_delay_ms = 10;
     constexpr ULONGLONG k_position_hook_delay_ms = 5000;
-    constexpr UINT k_path_point_count = 4;
     constexpr LONG k_drag_threshold_pixels = 3;
 
     struct input_state
@@ -41,12 +38,6 @@ namespace
         POINT anchor = {};
 
         UINT active_key = 0;
-        POINT drag_origin_screen = {};
-        POINT drag_target_screen = {};
-        UINT_PTR timer_id = 0;
-        bool injected_button_down = false;
-        bool target_reached = false;
-        bool key_release_pending = false;
         std::array<bool, 256> consumed_direction_keys = {};
         UINT skip_key_down = 0;
         UINT fullscreen_key_down = 0;
@@ -91,13 +82,6 @@ namespace
         return POINT { GET_X_LPARAM(value), GET_Y_LPARAM(value) };
     }
 
-    [[nodiscard]] LPARAM point_to_message(POINT point) noexcept
-    {
-        return MAKELPARAM(
-            static_cast<WORD>(static_cast<SHORT>(point.x)),
-            static_cast<WORD>(static_cast<SHORT>(point.y)));
-    }
-
     void consume_message(MSG &message) noexcept
     {
         message.message = WM_NULL;
@@ -112,80 +96,6 @@ namespace
         if (point.x >= client.right) point.x = client.right - 1;
         if (point.y >= client.bottom) point.y = client.bottom - 1;
         return point;
-    }
-
-    [[nodiscard]] bool make_move_input(POINT point, INPUT &input) noexcept
-    {
-        const LONG left = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        const LONG top = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        const LONG width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        const LONG height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-        if (width <= 1 || height <= 1)
-            return false;
-
-        if (point.x < left) point.x = left;
-        if (point.y < top) point.y = top;
-        if (point.x >= left + width) point.x = left + width - 1;
-        if (point.y >= top + height) point.y = top + height - 1;
-
-        input = {};
-        input.type = INPUT_MOUSE;
-        input.mi.dx = MulDiv(point.x - left, 65535, width - 1);
-        input.mi.dy = MulDiv(point.y - top, 65535, height - 1);
-        input.mi.dwFlags = MOUSEEVENTF_MOVE |
-            MOUSEEVENTF_ABSOLUTE |
-            MOUSEEVENTF_VIRTUALDESK |
-            MOUSEEVENTF_MOVE_NOCOALESCE;
-        return true;
-    }
-
-    [[nodiscard]] bool move_cursor(POINT point) noexcept
-    {
-        INPUT input = {};
-        return make_move_input(point, input) && SendInput(1, &input, sizeof(input)) == 1;
-    }
-
-    [[nodiscard]] bool move_drag_path() noexcept
-    {
-        INPUT inputs[k_path_point_count] = {};
-        for (UINT index = 0; index < k_path_point_count; ++index)
-        {
-            const LONG step = static_cast<LONG>(index + 1);
-            const LONG count = static_cast<LONG>(k_path_point_count);
-            const POINT point = {
-                g_input.drag_origin_screen.x +
-                    ((g_input.drag_target_screen.x - g_input.drag_origin_screen.x) * step) / count,
-                g_input.drag_origin_screen.y +
-                    ((g_input.drag_target_screen.y - g_input.drag_origin_screen.y) * step) / count,
-            };
-
-            if (!make_move_input(point, inputs[index]))
-                return false;
-        }
-
-        return SendInput(k_path_point_count, inputs, sizeof(INPUT)) == k_path_point_count;
-    }
-
-    [[nodiscard]] bool send_left_button(bool down) noexcept
-    {
-        INPUT input = {};
-        input.type = INPUT_MOUSE;
-        input.mi.dwFlags = down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
-        return SendInput(1, &input, sizeof(input)) == 1;
-    }
-
-    void release_left_button() noexcept
-    {
-        static_cast<void>(send_left_button(false));
-
-        if (g_input.window != nullptr)
-        {
-            POINT target = g_input.drag_target_screen;
-            if (ScreenToClient(g_input.window, &target))
-                SendMessageW(g_input.window, WM_LBUTTONUP, 0, point_to_message(target));
-            if (GetCapture() == g_input.window)
-                ReleaseCapture();
-        }
     }
 
     [[nodiscard]] bool click_skip_button() noexcept
@@ -207,33 +117,17 @@ namespace
             client.top + MulDiv(height, 6, 100),
         };
         target = clamp_to_client(target, client);
-        if (!ClientToScreen(g_input.window, &target) || !move_cursor(target))
-            return false;
-
-        const bool pressed = send_left_button(true);
-        const bool released = send_left_button(false);
-        return pressed && released;
+        return arknights::click_unity_ui(g_input.window, target);
     }
 
     void clear_active_direction() noexcept
     {
-        if (g_input.timer_id != 0 && g_input.window != nullptr)
-            KillTimer(g_input.window, g_input.timer_id);
-
         g_input.active_key = 0;
-        g_input.drag_origin_screen = {};
-        g_input.drag_target_screen = {};
-        g_input.timer_id = 0;
-        g_input.injected_button_down = false;
-        g_input.target_reached = false;
-        g_input.key_release_pending = false;
         g_input.consumed_direction_keys.fill(false);
     }
 
     void finish_active_direction() noexcept
     {
-        if (g_input.injected_button_down)
-            release_left_button();
         clear_active_direction();
     }
 
@@ -266,59 +160,12 @@ namespace
         }
 
         target = clamp_to_client(target, client);
-        POINT origin_screen = origin;
-        POINT target_screen = target;
-        if (!ClientToScreen(g_input.window, &origin_screen) ||
-            !ClientToScreen(g_input.window, &target_screen))
-        {
+        if (!arknights::drag_unity_ui(g_input.window, origin, target))
             return false;
-        }
 
         g_input.active_key = key;
-        g_input.drag_origin_screen = origin_screen;
-        g_input.drag_target_screen = target_screen;
-        g_input.target_reached = false;
-        g_input.key_release_pending = false;
-
-        if (!move_cursor(origin_screen) || !send_left_button(true))
-        {
-            clear_active_direction();
-            return false;
-        }
-
-        g_input.injected_button_down = true;
         consume_message(message);
-        g_input.timer_id = SetTimer(g_input.window, k_drag_timer_id, k_drag_delay_ms, nullptr);
-
-        if (g_input.timer_id == 0)
-        {
-            static_cast<void>(move_drag_path());
-            g_input.target_reached = true;
-        }
-
         return true;
-    }
-
-    void complete_drag_path(MSG &message) noexcept
-    {
-        if (g_input.active_key == 0 || !g_input.injected_button_down)
-        {
-            consume_message(message);
-            return;
-        }
-
-        KillTimer(g_input.window, g_input.timer_id);
-        g_input.timer_id = 0;
-
-        static_cast<void>(move_drag_path());
-        g_input.target_reached = true;
-        consume_message(message);
-
-        if (g_input.key_release_pending ||
-            (GetAsyncKeyState(static_cast<int>(g_input.active_key)) & 0x8000) == 0)
-        {
-            finish_active_direction();
-        }
     }
 
     void track_physical_mouse_message(const MSG &message) noexcept
@@ -379,14 +226,6 @@ namespace
             g_input.anchor_valid = false;
             g_input.skip_key_down = 0;
             g_input.fullscreen_key_down = 0;
-            return;
-        }
-
-        if (message.message == WM_TIMER &&
-            g_input.timer_id != 0 &&
-            message.wParam == g_input.timer_id)
-        {
-            complete_drag_path(message);
             return;
         }
 
@@ -510,12 +349,7 @@ namespace
         consume_message(message);
 
         if (g_input.active_key == key)
-        {
-            if (g_input.target_reached)
-                finish_active_direction();
-            else
-                g_input.key_release_pending = true;
-        }
+            finish_active_direction();
     }
 
     LRESULT CALLBACK get_message_hook(int code, WPARAM wparam, LPARAM lparam)
@@ -623,6 +457,7 @@ namespace
 
         g_input.window_thread_id = thread_id;
         g_input.runtime = runtime;
+        static_cast<void>(arknights::initialize_unity_input());
         if (g_input.position_hook_ready_at == 0)
         {
             g_input.position_hook_ready_at =
