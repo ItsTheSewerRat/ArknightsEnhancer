@@ -6,6 +6,7 @@ A 64-bit ReShade add-on with quality-of-life features for the official Arknights
 
 - Set an operator's deployment direction with **W/A/S/D** after placing them.
 - Press the in-game **Skip** button with **Tab**.
+- Toggle between windowed and fullscreen with **F12**.
 - Resize the window with a corner grip. The minimum client height is 480 px.
 - Control Arknights audio from the title bar with a mute button, volume slider, or mouse wheel.
 

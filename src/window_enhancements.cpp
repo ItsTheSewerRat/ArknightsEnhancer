@@ -68,7 +68,17 @@ namespace
         overlay_thread_context *context = nullptr;
     };
 
+    struct fullscreen_state
+    {
+        HWND window = nullptr;
+        LONG_PTR style = 0;
+        LONG_PTR extended_style = 0;
+        WINDOWPLACEMENT placement = { sizeof(WINDOWPLACEMENT) };
+        bool active = false;
+    };
+
     enhancement_lifecycle g_enhancements;
+    fullscreen_state g_fullscreen;
 
     [[nodiscard]] int scale_for_dpi(int value, UINT dpi) noexcept
     {
@@ -80,6 +90,42 @@ namespace
         SetLastError(ERROR_SUCCESS);
         style = GetWindowLongPtrW(window, GWL_STYLE);
         return style != 0 || GetLastError() == ERROR_SUCCESS;
+    }
+
+    [[nodiscard]] bool read_extended_window_style(
+        HWND window,
+        LONG_PTR &style) noexcept
+    {
+        SetLastError(ERROR_SUCCESS);
+        style = GetWindowLongPtrW(window, GWL_EXSTYLE);
+        return style != 0 || GetLastError() == ERROR_SUCCESS;
+    }
+
+    void restore_windowed_mode() noexcept
+    {
+        if (!g_fullscreen.active)
+            return;
+
+        if (IsWindow(g_fullscreen.window))
+        {
+            SetWindowLongPtrW(g_fullscreen.window, GWL_STYLE, g_fullscreen.style);
+            SetWindowLongPtrW(
+                g_fullscreen.window,
+                GWL_EXSTYLE,
+                g_fullscreen.extended_style);
+            SetWindowPlacement(g_fullscreen.window, &g_fullscreen.placement);
+            SetWindowPos(
+                g_fullscreen.window,
+                nullptr,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE |
+                    SWP_NOOWNERZORDER | SWP_NOZORDER);
+        }
+
+        g_fullscreen = {};
     }
 
 
@@ -2023,8 +2069,67 @@ namespace arknights
         }
     }
 
+    void toggle_game_fullscreen(HWND game_window) noexcept
+    {
+        if (game_window == nullptr || !IsWindow(game_window))
+            return;
+
+        if (g_fullscreen.active)
+        {
+            restore_windowed_mode();
+            return;
+        }
+
+        LONG_PTR style = 0;
+        LONG_PTR extended_style = 0;
+        WINDOWPLACEMENT placement = { sizeof(WINDOWPLACEMENT) };
+        MONITORINFO monitor = { sizeof(MONITORINFO) };
+        const HMONITOR monitor_handle =
+            MonitorFromWindow(game_window, MONITOR_DEFAULTTONEAREST);
+
+        if (!read_window_style(game_window, style) ||
+            !read_extended_window_style(game_window, extended_style) ||
+            !GetWindowPlacement(game_window, &placement) ||
+            monitor_handle == nullptr ||
+            !GetMonitorInfoW(monitor_handle, &monitor))
+        {
+            return;
+        }
+
+        g_fullscreen.window = game_window;
+        g_fullscreen.style = style;
+        g_fullscreen.extended_style = extended_style;
+        g_fullscreen.placement = placement;
+        g_fullscreen.active = true;
+
+        SetWindowLongPtrW(
+            game_window,
+            GWL_STYLE,
+            (style & ~(WS_OVERLAPPEDWINDOW | WS_MAXIMIZE)) | WS_POPUP);
+        SetWindowLongPtrW(
+            game_window,
+            GWL_EXSTYLE,
+            extended_style &
+                ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE |
+                  WS_EX_CLIENTEDGE | WS_EX_STATICEDGE));
+
+        if (!SetWindowPos(
+                game_window,
+                HWND_TOP,
+                monitor.rcMonitor.left,
+                monitor.rcMonitor.top,
+                monitor.rcMonitor.right - monitor.rcMonitor.left,
+                monitor.rcMonitor.bottom - monitor.rcMonitor.top,
+                SWP_FRAMECHANGED | SWP_NOOWNERZORDER))
+        {
+            restore_windowed_mode();
+        }
+    }
+
     void uninstall_window_enhancements() noexcept
     {
+        restore_windowed_mode();
+
         overlay_thread_context *const context = g_enhancements.context;
         HANDLE const thread = g_enhancements.thread;
         if (context == nullptr)

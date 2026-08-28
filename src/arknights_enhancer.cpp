@@ -46,6 +46,7 @@ namespace
         bool key_release_pending = false;
         std::uint8_t consumed_direction_keys = 0;
         bool tab_down = false;
+        bool fullscreen_key_down = false;
     };
 
     input_state g_input;
@@ -353,6 +354,7 @@ namespace
         {
             finish_active_direction();
             g_input.tab_down = false;
+            g_input.fullscreen_key_down = false;
             consume_message(message);
             return;
         }
@@ -364,6 +366,7 @@ namespace
             g_input.tracking_physical_drag = false;
             g_input.anchor_valid = false;
             g_input.tab_down = false;
+            g_input.fullscreen_key_down = false;
             return;
         }
 
@@ -395,6 +398,37 @@ namespace
 
         const UINT key = static_cast<UINT>(message.wParam);
         const bool key_down = message.message == WM_KEYDOWN || message.message == WM_SYSKEYDOWN;
+
+        if (key == VK_F12)
+        {
+            const bool modified = (GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
+                                  (GetKeyState(VK_MENU) & 0x8000) != 0 ||
+                                  (GetKeyState(VK_SHIFT) & 0x8000) != 0 ||
+                                  (GetKeyState(VK_LWIN) & 0x8000) != 0 ||
+                                  (GetKeyState(VK_RWIN) & 0x8000) != 0;
+
+            if (key_down)
+            {
+                if (modified)
+                    return;
+
+                if (!g_input.fullscreen_key_down)
+                {
+                    finish_active_direction();
+                    arknights::toggle_game_fullscreen(g_input.window);
+                    g_input.fullscreen_key_down = true;
+                }
+                consume_message(message);
+                return;
+            }
+
+            if (g_input.fullscreen_key_down)
+            {
+                g_input.fullscreen_key_down = false;
+                consume_message(message);
+            }
+            return;
+        }
 
         if (key == VK_TAB)
         {
@@ -624,8 +658,8 @@ extern "C" __declspec(dllexport) const char *NAME = "ArknightsEnhancer";
 extern "C" __declspec(dllexport) const char *AUTHOR = "ItsTheSewerRat";
 extern "C" __declspec(dllexport) const char *DESCRIPTION =
     "Quality-of-life features for Arknights: set deploy direction of operators "
-    "with WASD, press the Skip button with Tab, resize the game window, and "
-    "control game audio from the title bar.";
+    "with WASD, press the Skip button with Tab, toggle fullscreen with F12, "
+    "resize the game window, and control game audio from the title bar.";
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {
