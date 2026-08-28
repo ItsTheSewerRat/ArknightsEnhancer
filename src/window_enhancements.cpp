@@ -1,5 +1,7 @@
 #include "window_enhancements.hpp"
 
+#include "shortcut_settings.hpp"
+
 #include <audioclient.h>
 #include <audiopolicy.h>
 #include <dwmapi.h>
@@ -17,10 +19,6 @@ namespace
 {
     constexpr wchar_t k_audio_overlay_class[] =
         L"ArknightsAudioTitleBarControl";
-    constexpr wchar_t k_resize_grip_class[] =
-        L"ArknightsWindowResizeGrip";
-    constexpr wchar_t k_resize_preview_class[] =
-        L"ArknightsWindowResizePreview";
     constexpr DWORD k_overlay_fallback_interval_ms = 16;
     constexpr DWORD k_audio_refresh_interval_ms = 3000;
     constexpr DWORD k_audio_poll_interval_ms = 100;
@@ -29,15 +27,12 @@ namespace
     constexpr int k_overlay_height_dip = 24;
     constexpr int k_button_width_dip = 31;
     constexpr int k_overlay_margin_dip = 5;
-    constexpr int k_resize_grip_size_dip = 13;
-    constexpr int k_resize_preview_border_dip = 2;
     constexpr int k_minimum_resize_height = 480;
     constexpr int k_audio_supersample_scale = 4;
     constexpr COLORREF k_default_light_caption_color = RGB(243, 243, 243);
     constexpr COLORREF k_default_dark_caption_color = RGB(32, 32, 32);
     constexpr COLORREF k_arknights_cyan = RGB(0, 194, 222);
     constexpr COLORREF k_arknights_yellow = RGB(247, 181, 0);
-    constexpr BYTE k_resize_grip_surface_alpha = 40;
     constexpr DWMWINDOWATTRIBUTE k_immersive_dark_mode_attribute =
         static_cast<DWMWINDOWATTRIBUTE>(20);
     constexpr DWMWINDOWATTRIBUTE k_caption_color_attribute =
@@ -54,10 +49,6 @@ namespace
         std::atomic<LONG> overlay_offset_x = 0;
         std::atomic<LONG> overlay_offset_y = 0;
         std::atomic_bool overlay_visible = false;
-        std::atomic<HWND> resize_grip_window = nullptr;
-        std::atomic<LONG> resize_grip_offset_x = 0;
-        std::atomic<LONG> resize_grip_offset_y = 0;
-        std::atomic_bool resize_grip_visible = false;
     };
 
     struct enhancement_lifecycle
@@ -77,8 +68,23 @@ namespace
         bool active = false;
     };
 
+    struct native_resize_state
+    {
+        HWND window = nullptr;
+        WNDPROC original_window_proc = nullptr;
+        LONG_PTR original_style = 0;
+        LONG client_width = 0;
+        LONG client_height = 0;
+        LONG frame_width = 0;
+        LONG frame_height = 0;
+        WPARAM pending_size_type = SIZE_RESTORED;
+        bool resizing = false;
+        bool size_message_pending = false;
+    };
+
     enhancement_lifecycle g_enhancements;
     fullscreen_state g_fullscreen;
+    native_resize_state g_native_resize;
 
     [[nodiscard]] int scale_for_dpi(int value, UINT dpi) noexcept
     {
@@ -99,6 +105,373 @@ namespace
         SetLastError(ERROR_SUCCESS);
         style = GetWindowLongPtrW(window, GWL_EXSTYLE);
         return style != 0 || GetLastError() == ERROR_SUCCESS;
+    }
+
+    void capture_native_resize_metrics(HWND window) noexcept
+    {
+        RECT window_rect = {};
+        RECT client_rect = {};
+        if (!GetWindowRect(window, &window_rect) ||
+            !GetClientRect(window, &client_rect))
+        {
+            return;
+        }
+
+        const LONG client_width = client_rect.right - client_rect.left;
+        const LONG client_height = client_rect.bottom - client_rect.top;
+        const LONG frame_width =
+            (window_rect.right - window_rect.left) - client_width;
+        const LONG frame_height =
+            (window_rect.bottom - window_rect.top) - client_height;
+        if (client_width <= 0 || client_height <= 0 ||
+            frame_width < 0 || frame_height < 0)
+        {
+            return;
+        }
+
+        g_native_resize.client_width = client_width;
+        g_native_resize.client_height = client_height;
+        g_native_resize.frame_width = frame_width;
+        g_native_resize.frame_height = frame_height;
+    }
+
+    [[nodiscard]] bool constrain_native_resize(
+        WPARAM edge,
+        RECT &rect) noexcept
+    {
+        if (g_native_resize.client_width <= 0 ||
+            g_native_resize.client_height <= 0)
+        {
+            capture_native_resize_metrics(g_native_resize.window);
+        }
+        if (g_native_resize.client_width <= 0 ||
+            g_native_resize.client_height <= 0)
+        {
+            return false;
+        }
+
+        const bool move_left =
+            edge == WMSZ_LEFT || edge == WMSZ_TOPLEFT ||
+            edge == WMSZ_BOTTOMLEFT;
+        const bool move_right =
+            edge == WMSZ_RIGHT || edge == WMSZ_TOPRIGHT ||
+            edge == WMSZ_BOTTOMRIGHT;
+        const bool move_top =
+            edge == WMSZ_TOP || edge == WMSZ_TOPLEFT ||
+            edge == WMSZ_TOPRIGHT;
+        const bool move_bottom =
+            edge == WMSZ_BOTTOM || edge == WMSZ_BOTTOMLEFT ||
+            edge == WMSZ_BOTTOMRIGHT;
+        if (!move_left && !move_right && !move_top && !move_bottom)
+            return false;
+
+        const LONG proposed_client_width =
+            rect.right - rect.left - g_native_resize.frame_width;
+        const LONG proposed_client_height =
+            rect.bottom - rect.top - g_native_resize.frame_height;
+        const bool horizontal_only =
+            (move_left || move_right) && !move_top && !move_bottom;
+        const bool vertical_only =
+            (move_top || move_bottom) && !move_left && !move_right;
+        const LONG horizontal_change = std::abs(
+            proposed_client_width - g_native_resize.client_width);
+        const LONG vertical_change_as_width = std::abs(MulDiv(
+            proposed_client_height - g_native_resize.client_height,
+            g_native_resize.client_width,
+            g_native_resize.client_height));
+        const bool width_drives = horizontal_only ||
+            (!vertical_only && horizontal_change >= vertical_change_as_width);
+        const LONG minimum_client_width = MulDiv(
+            k_minimum_resize_height,
+            g_native_resize.client_width,
+            g_native_resize.client_height);
+        LONG client_width = width_drives
+            ? proposed_client_width
+            : MulDiv(
+                  proposed_client_height,
+                  g_native_resize.client_width,
+                  g_native_resize.client_height);
+        client_width = std::max(minimum_client_width, client_width);
+        const LONG client_height = MulDiv(
+            client_width,
+            g_native_resize.client_height,
+            g_native_resize.client_width);
+        const LONG outer_width = client_width + g_native_resize.frame_width;
+        const LONG outer_height = client_height + g_native_resize.frame_height;
+
+        if (move_left)
+            rect.left = rect.right - outer_width;
+        else if (move_right)
+            rect.right = rect.left + outer_width;
+        else
+        {
+            const LONG center_x = (rect.left + rect.right) / 2;
+            rect.left = center_x - outer_width / 2;
+            rect.right = rect.left + outer_width;
+        }
+        if (move_top)
+            rect.top = rect.bottom - outer_height;
+        else if (move_bottom)
+            rect.bottom = rect.top + outer_height;
+        else
+        {
+            const LONG center_y = (rect.top + rect.bottom) / 2;
+            rect.top = center_y - outer_height / 2;
+            rect.bottom = rect.top + outer_height;
+        }
+        return true;
+    }
+
+    [[nodiscard]] LRESULT native_resize_hit_test(
+        HWND window,
+        LPARAM position) noexcept
+    {
+        LONG_PTR style = 0;
+        RECT rect = {};
+        if (!read_window_style(window, style) ||
+            (style & WS_THICKFRAME) == 0 ||
+            (style & WS_POPUP) != 0 ||
+            IsZoomed(window) ||
+            !GetWindowRect(window, &rect))
+        {
+            return HTNOWHERE;
+        }
+
+        UINT dpi = GetDpiForWindow(window);
+        if (dpi == 0)
+            dpi = 96;
+        const int border_x = std::max(
+            1,
+            GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) +
+                GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi));
+        const int border_y = std::max(
+            1,
+            GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) +
+                GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi));
+        const POINT cursor = {
+            GET_X_LPARAM(position),
+            GET_Y_LPARAM(position),
+        };
+        const bool left = cursor.x < rect.left + border_x;
+        const bool right = cursor.x >= rect.right - border_x;
+        const bool top = cursor.y < rect.top + border_y;
+        const bool bottom = cursor.y >= rect.bottom - border_y;
+
+        if (left && top)
+            return HTTOPLEFT;
+        if (right && top)
+            return HTTOPRIGHT;
+        if (left && bottom)
+            return HTBOTTOMLEFT;
+        if (right && bottom)
+            return HTBOTTOMRIGHT;
+        if (left)
+            return HTLEFT;
+        if (right)
+            return HTRIGHT;
+        if (top)
+            return HTTOP;
+        if (bottom)
+            return HTBOTTOM;
+        return HTNOWHERE;
+    }
+
+    LRESULT CALLBACK native_resize_window_proc(
+        HWND window,
+        UINT message,
+        WPARAM wparam,
+        LPARAM lparam)
+    {
+        WNDPROC const original = g_native_resize.original_window_proc;
+        if (original == nullptr)
+            return DefWindowProcW(window, message, wparam, lparam);
+
+        switch (message)
+        {
+        case WM_NCHITTEST:
+        {
+            const LRESULT result =
+                CallWindowProcW(original, window, message, wparam, lparam);
+            if (result != HTCLIENT && result != HTBORDER)
+                return result;
+            const LRESULT resize_result =
+                native_resize_hit_test(window, lparam);
+            return resize_result == HTNOWHERE ? result : resize_result;
+        }
+
+        case WM_ENTERSIZEMOVE:
+            capture_native_resize_metrics(window);
+            g_native_resize.resizing = false;
+            g_native_resize.size_message_pending = false;
+            arknights::preserve_overlay_scale_after_resize(window);
+            break;
+
+        case WM_SIZING:
+            if (lparam != 0)
+            {
+                auto *const proposed = reinterpret_cast<RECT *>(lparam);
+                if (constrain_native_resize(wparam, *proposed))
+                {
+                    g_native_resize.resizing = true;
+                    arknights::preserve_overlay_scale_after_resize(window);
+                    return TRUE;
+                }
+            }
+            break;
+
+        case WM_SIZE:
+            if (g_native_resize.resizing && wparam != SIZE_MINIMIZED)
+            {
+                g_native_resize.pending_size_type = wparam;
+                g_native_resize.size_message_pending = true;
+                return 0;
+            }
+            break;
+
+        case WM_EXITSIZEMOVE:
+        {
+            const bool send_final_size =
+                g_native_resize.size_message_pending;
+            const WPARAM final_size_type =
+                g_native_resize.pending_size_type;
+            g_native_resize.resizing = false;
+            g_native_resize.size_message_pending = false;
+
+            if (send_final_size)
+            {
+                RECT client = {};
+                if (GetClientRect(window, &client))
+                {
+                    CallWindowProcW(
+                        original,
+                        window,
+                        WM_SIZE,
+                        final_size_type,
+                        MAKELPARAM(
+                            client.right - client.left,
+                            client.bottom - client.top));
+                }
+            }
+            return CallWindowProcW(
+                original,
+                window,
+                message,
+                wparam,
+                lparam);
+        }
+
+        case WM_GETMINMAXINFO:
+            if (lparam != 0)
+            {
+                const LRESULT result =
+                    CallWindowProcW(original, window, message, wparam, lparam);
+                capture_native_resize_metrics(window);
+                if (g_native_resize.client_width <= 0 ||
+                    g_native_resize.client_height <= 0)
+                {
+                    return result;
+                }
+                auto *const limits = reinterpret_cast<MINMAXINFO *>(lparam);
+                const LONG minimum_client_width = MulDiv(
+                    k_minimum_resize_height,
+                    g_native_resize.client_width,
+                    g_native_resize.client_height);
+                limits->ptMinTrackSize.x = std::max<LONG>(
+                    limits->ptMinTrackSize.x,
+                    minimum_client_width + g_native_resize.frame_width);
+                limits->ptMinTrackSize.y = std::max<LONG>(
+                    limits->ptMinTrackSize.y,
+                    k_minimum_resize_height + g_native_resize.frame_height);
+                return result;
+            }
+            break;
+
+        case WM_NCDESTROY:
+        {
+            const LRESULT result =
+                CallWindowProcW(original, window, message, wparam, lparam);
+            g_native_resize = {};
+            return result;
+        }
+
+        default:
+            break;
+        }
+
+        return CallWindowProcW(original, window, message, wparam, lparam);
+    }
+
+    void disable_native_resize() noexcept
+    {
+        if (!IsWindow(g_native_resize.window))
+        {
+            g_native_resize = {};
+            return;
+        }
+
+        const auto current_proc = reinterpret_cast<WNDPROC>(
+            GetWindowLongPtrW(g_native_resize.window, GWLP_WNDPROC));
+        if (current_proc == native_resize_window_proc &&
+            g_native_resize.original_window_proc != nullptr)
+        {
+            SetWindowLongPtrW(
+                g_native_resize.window,
+                GWLP_WNDPROC,
+                reinterpret_cast<LONG_PTR>(
+                    g_native_resize.original_window_proc));
+        }
+        SetWindowLongPtrW(
+            g_native_resize.window,
+            GWL_STYLE,
+            g_native_resize.original_style);
+        SetWindowPos(
+            g_native_resize.window,
+            nullptr,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE |
+                SWP_NOACTIVATE | SWP_NOZORDER);
+        g_native_resize = {};
+    }
+
+    [[nodiscard]] bool enable_native_resize(HWND window) noexcept
+    {
+        if (g_native_resize.window == window &&
+            g_native_resize.original_window_proc != nullptr)
+        {
+            return true;
+        }
+
+        disable_native_resize();
+        LONG_PTR style = 0;
+        if (!read_window_style(window, style))
+            return false;
+
+        SetLastError(ERROR_SUCCESS);
+        const auto original = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+            window,
+            GWLP_WNDPROC,
+            reinterpret_cast<LONG_PTR>(native_resize_window_proc)));
+        if (original == nullptr && GetLastError() != ERROR_SUCCESS)
+            return false;
+
+        g_native_resize.window = window;
+        g_native_resize.original_window_proc = original;
+        g_native_resize.original_style = style;
+        SetWindowLongPtrW(window, GWL_STYLE, style | WS_THICKFRAME);
+        SetWindowPos(
+            window,
+            nullptr,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE |
+                SWP_NOACTIVATE | SWP_NOZORDER);
+        capture_native_resize_metrics(window);
+        return true;
     }
 
     void restore_windowed_mode() noexcept
@@ -343,27 +716,6 @@ namespace
         RECT last_window_rect = {};
         ULONGLONG last_audio_refresh = 0;
         ULONGLONG last_audio_poll = 0;
-    };
-
-    struct resize_grip_state
-    {
-        overlay_thread_context *context = nullptr;
-        HWND window = nullptr;
-        HWND preview_window = nullptr;
-        HWND game_window = nullptr;
-        UINT dpi = 96;
-        bool visible = false;
-        bool dragging = false;
-        bool preview_drawn = false;
-        COLORREF caption_color = k_default_light_caption_color;
-        POINT drag_start = {};
-        RECT initial_window_rect = {};
-        RECT preview_rect = {};
-        LONG initial_client_width = 0;
-        LONG initial_client_height = 0;
-        LONG frame_width = 0;
-        LONG frame_height = 0;
-        RECT last_window_rect = {};
     };
 
     [[nodiscard]] RECT get_button_rect(const audio_overlay_state &state) noexcept
@@ -1059,459 +1411,6 @@ namespace
         }
     }
 
-    LRESULT CALLBACK resize_preview_window_proc(
-        HWND window,
-        UINT message,
-        WPARAM wparam,
-        LPARAM lparam)
-    {
-        switch (message)
-        {
-        case WM_PAINT:
-        {
-            PAINTSTRUCT paint = {};
-            HDC device_context = BeginPaint(window, &paint);
-            if (device_context != nullptr)
-            {
-                RECT client = {};
-                GetClientRect(window, &client);
-                HBRUSH brush = CreateSolidBrush(k_arknights_cyan);
-                FillRect(device_context, &client, brush);
-                DeleteObject(brush);
-                EndPaint(window, &paint);
-            }
-            return 0;
-        }
-        case WM_ERASEBKGND:
-            return 1;
-        case WM_NCHITTEST:
-            return HTTRANSPARENT;
-        default:
-            return DefWindowProcW(window, message, wparam, lparam);
-        }
-    }
-
-    [[nodiscard]] bool show_resize_preview(
-        resize_grip_state &state,
-        const RECT &rect) noexcept
-    {
-        if (!IsWindow(state.preview_window))
-            return false;
-
-        const int width = rect.right - rect.left;
-        const int height = rect.bottom - rect.top;
-        const int border = std::max(
-            1,
-            scale_for_dpi(k_resize_preview_border_dip, state.dpi));
-        if (width <= border * 2 || height <= border * 2)
-            return false;
-
-        HRGN outline = CreateRectRgn(0, 0, width, height);
-        HRGN interior = CreateRectRgn(
-            border,
-            border,
-            width - border,
-            height - border);
-        if (outline == nullptr || interior == nullptr)
-        {
-            if (outline != nullptr)
-                DeleteObject(outline);
-            if (interior != nullptr)
-                DeleteObject(interior);
-            return false;
-        }
-
-        const int region_result = CombineRgn(
-            outline,
-            outline,
-            interior,
-            RGN_DIFF);
-        DeleteObject(interior);
-        if (region_result == ERROR ||
-            SetWindowRgn(state.preview_window, outline, FALSE) == 0)
-        {
-            DeleteObject(outline);
-            return false;
-        }
-
-        SetWindowPos(
-            state.preview_window,
-            HWND_TOP,
-            rect.left,
-            rect.top,
-            width,
-            height,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOSENDCHANGING);
-        RedrawWindow(
-            state.preview_window,
-            nullptr,
-            nullptr,
-            RDW_INVALIDATE | RDW_UPDATENOW);
-        state.preview_drawn = true;
-        return true;
-    }
-
-    void erase_resize_preview(resize_grip_state &state) noexcept
-    {
-        if (!state.preview_drawn)
-            return;
-
-        ShowWindow(state.preview_window, SW_HIDE);
-        state.preview_drawn = false;
-    }
-
-    void cancel_resize_drag(resize_grip_state &state) noexcept
-    {
-        erase_resize_preview(state);
-        state.dragging = false;
-        if (GetCapture() == state.window)
-            ReleaseCapture();
-    }
-
-    [[nodiscard]] bool begin_resize_drag(resize_grip_state &state) noexcept
-    {
-        RECT client = {};
-        if (!GetWindowRect(state.game_window, &state.initial_window_rect) ||
-            !GetClientRect(state.game_window, &client) ||
-            !GetCursorPos(&state.drag_start))
-        {
-            return false;
-        }
-
-        state.initial_client_width = client.right - client.left;
-        state.initial_client_height = client.bottom - client.top;
-        if (state.initial_client_width <= 0 || state.initial_client_height <= 0)
-            return false;
-
-        state.frame_width =
-            (state.initial_window_rect.right - state.initial_window_rect.left) -
-            state.initial_client_width;
-        state.frame_height =
-            (state.initial_window_rect.bottom - state.initial_window_rect.top) -
-            state.initial_client_height;
-        if (state.frame_width < 0 || state.frame_height < 0)
-            return false;
-
-        state.preview_rect = state.initial_window_rect;
-        if (!show_resize_preview(state, state.preview_rect))
-            return false;
-
-        state.dragging = true;
-        SetCapture(state.window);
-        return true;
-    }
-
-    void update_resize_drag(
-        resize_grip_state &state,
-        const POINT &cursor) noexcept
-    {
-        if (!state.dragging)
-            return;
-
-        const LONG minimum_client_width = MulDiv(
-            k_minimum_resize_height,
-            state.initial_client_width,
-            state.initial_client_height);
-        LONG client_width = std::max<LONG>(
-            minimum_client_width,
-            state.initial_client_width + cursor.x - state.drag_start.x);
-        LONG client_height = MulDiv(
-            client_width,
-            state.initial_client_height,
-            state.initial_client_width);
-        if (client_height < k_minimum_resize_height)
-        {
-            client_height = k_minimum_resize_height;
-            client_width = MulDiv(
-                client_height,
-                state.initial_client_width,
-                state.initial_client_height);
-        }
-
-        MONITORINFO monitor = {};
-        monitor.cbSize = sizeof(monitor);
-        const HMONITOR display = MonitorFromWindow(
-            state.game_window,
-            MONITOR_DEFAULTTONEAREST);
-        if (GetMonitorInfoW(display, &monitor))
-        {
-            const LONG maximum_client_width = std::max<LONG>(
-                minimum_client_width,
-                monitor.rcWork.right - state.initial_window_rect.left -
-                    state.frame_width);
-            const LONG maximum_client_height = std::max<LONG>(
-                k_minimum_resize_height,
-                monitor.rcWork.bottom - state.initial_window_rect.top -
-                    state.frame_height);
-            if (client_width > maximum_client_width)
-            {
-                client_width = maximum_client_width;
-                client_height = MulDiv(
-                    client_width,
-                    state.initial_client_height,
-                    state.initial_client_width);
-            }
-            if (client_height > maximum_client_height)
-            {
-                client_height = maximum_client_height;
-                client_width = MulDiv(
-                    client_height,
-                    state.initial_client_width,
-                    state.initial_client_height);
-            }
-        }
-
-        const RECT target = {
-            state.initial_window_rect.left,
-            state.initial_window_rect.top,
-            state.initial_window_rect.left + client_width + state.frame_width,
-            state.initial_window_rect.top + client_height + state.frame_height,
-        };
-        if (EqualRect(&target, &state.preview_rect))
-            return;
-
-        state.preview_rect = target;
-        static_cast<void>(show_resize_preview(state, state.preview_rect));
-    }
-
-    void commit_resize_drag(resize_grip_state &state) noexcept
-    {
-        if (!state.dragging)
-            return;
-
-        const RECT target = state.preview_rect;
-        erase_resize_preview(state);
-        state.dragging = false;
-        if (GetCapture() == state.window)
-            ReleaseCapture();
-
-        if (EqualRect(&target, &state.initial_window_rect))
-            return;
-
-        SetWindowPos(
-            state.game_window,
-            nullptr,
-            target.left,
-            target.top,
-            target.right - target.left,
-            target.bottom - target.top,
-            SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER);
-    }
-
-    [[nodiscard]] std::uint32_t make_premultiplied_pixel(
-        COLORREF color,
-        BYTE alpha) noexcept
-    {
-        const unsigned int red =
-            static_cast<unsigned int>(GetRValue(color)) * alpha / 255u;
-        const unsigned int green =
-            static_cast<unsigned int>(GetGValue(color)) * alpha / 255u;
-        const unsigned int blue =
-            static_cast<unsigned int>(GetBValue(color)) * alpha / 255u;
-        return static_cast<std::uint32_t>(
-            (static_cast<unsigned int>(alpha) << 24u) |
-            (red << 16u) |
-            (green << 8u) |
-            blue);
-    }
-
-    [[nodiscard]] bool render_resize_grip(
-        resize_grip_state &state,
-        const RECT &target) noexcept
-    {
-        const int width = target.right - target.left;
-        const int height = target.bottom - target.top;
-        if (!IsWindow(state.window) || width <= 0 || height <= 0)
-            return false;
-
-        HDC screen_context = GetDC(nullptr);
-        if (screen_context == nullptr)
-            return false;
-
-        HDC memory_context = CreateCompatibleDC(screen_context);
-        if (memory_context == nullptr)
-        {
-            ReleaseDC(nullptr, screen_context);
-            return false;
-        }
-
-        BITMAPINFO bitmap_info = {};
-        bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bitmap_info.bmiHeader.biWidth = width;
-        bitmap_info.bmiHeader.biHeight = -height;
-        bitmap_info.bmiHeader.biPlanes = 1;
-        bitmap_info.bmiHeader.biBitCount = 32;
-        bitmap_info.bmiHeader.biCompression = BI_RGB;
-
-        void *raw_pixels = nullptr;
-        HBITMAP bitmap = CreateDIBSection(
-            screen_context,
-            &bitmap_info,
-            DIB_RGB_COLORS,
-            &raw_pixels,
-            nullptr,
-            0);
-        if (bitmap == nullptr || raw_pixels == nullptr)
-        {
-            if (bitmap != nullptr)
-                DeleteObject(bitmap);
-            DeleteDC(memory_context);
-            ReleaseDC(nullptr, screen_context);
-            return false;
-        }
-
-        const HGDIOBJ previous_bitmap = SelectObject(memory_context, bitmap);
-        auto *const pixels = static_cast<std::uint32_t *>(raw_pixels);
-        std::fill_n(
-            pixels,
-            static_cast<std::size_t>(width) *
-                static_cast<std::size_t>(height),
-            UINT32_C(0));
-
-        const std::uint32_t surface_pixel = make_premultiplied_pixel(
-            state.caption_color,
-            k_resize_grip_surface_alpha);
-        const std::uint32_t accent_pixel = make_premultiplied_pixel(
-            k_arknights_cyan,
-            255);
-        const int diagonal_limit = std::min(width, height) - 1;
-        const int line_gap = std::max(2, scale_for_dpi(3, state.dpi));
-        const int line_half_width =
-            std::max(0, scale_for_dpi(1, state.dpi) - 1);
-
-        for (int y = 0; y < height; ++y)
-        {
-            for (int x = 0; x < width; ++x)
-            {
-                if (x + y < diagonal_limit)
-                    continue;
-
-                std::uint32_t pixel = surface_pixel;
-                const int sum = x + y;
-                for (int index = 1; index <= 3; ++index)
-                {
-                    const int line_sum =
-                        (width - 1) + (height - 1) - index * line_gap;
-                    if (std::abs(sum - line_sum) <= line_half_width)
-                    {
-                        pixel = accent_pixel;
-                        break;
-                    }
-                }
-                pixels[static_cast<std::size_t>(y) *
-                           static_cast<std::size_t>(width) +
-                       static_cast<std::size_t>(x)] = pixel;
-            }
-        }
-
-        POINT destination = { target.left, target.top };
-        POINT source = {};
-        SIZE size = { width, height };
-        BLENDFUNCTION blend = {};
-        blend.BlendOp = AC_SRC_OVER;
-        blend.SourceConstantAlpha = 255;
-        blend.AlphaFormat = AC_SRC_ALPHA;
-        const BOOL updated = UpdateLayeredWindow(
-            state.window,
-            screen_context,
-            &destination,
-            &size,
-            memory_context,
-            &source,
-            0,
-            &blend,
-            ULW_ALPHA);
-
-        SelectObject(memory_context, previous_bitmap);
-        DeleteObject(bitmap);
-        DeleteDC(memory_context);
-        ReleaseDC(nullptr, screen_context);
-        return updated != FALSE;
-    }
-
-    LRESULT CALLBACK resize_grip_window_proc(
-        HWND window,
-        UINT message,
-        WPARAM wparam,
-        LPARAM lparam)
-    {
-        auto *state = reinterpret_cast<resize_grip_state *>(
-            GetWindowLongPtrW(window, GWLP_USERDATA));
-        if (message == WM_NCCREATE)
-        {
-            const auto *const create = reinterpret_cast<CREATESTRUCTW *>(lparam);
-            state = static_cast<resize_grip_state *>(create->lpCreateParams);
-            SetWindowLongPtrW(
-                window,
-                GWLP_USERDATA,
-                reinterpret_cast<LONG_PTR>(state));
-        }
-
-        if (state == nullptr)
-            return DefWindowProcW(window, message, wparam, lparam);
-
-        switch (message)
-        {
-        case WM_PAINT:
-        {
-            PAINTSTRUCT paint = {};
-            BeginPaint(window, &paint);
-            EndPaint(window, &paint);
-            return 0;
-        }
-        case WM_ERASEBKGND:
-            return 1;
-        case WM_NCHITTEST:
-        {
-            POINT point = {
-                GET_X_LPARAM(lparam),
-                GET_Y_LPARAM(lparam),
-            };
-            ScreenToClient(window, &point);
-            RECT client = {};
-            GetClientRect(window, &client);
-            const int width = client.right - client.left;
-            const int height = client.bottom - client.top;
-            return point.x + point.y >= std::min(width, height) - 1
-                ? HTCLIENT
-                : HTTRANSPARENT;
-        }
-        case WM_SETCURSOR:
-            SetCursor(LoadCursorW(nullptr, IDC_SIZENWSE));
-            return TRUE;
-        case WM_LBUTTONDOWN:
-            static_cast<void>(begin_resize_drag(*state));
-            return 0;
-        case WM_MOUSEMOVE:
-            if (state->dragging)
-            {
-                POINT cursor = {};
-                if (GetCursorPos(&cursor))
-                    update_resize_drag(*state, cursor);
-            }
-            return 0;
-        case WM_LBUTTONUP:
-            if (state->dragging)
-            {
-                POINT cursor = {};
-                if (GetCursorPos(&cursor))
-                    update_resize_drag(*state, cursor);
-                commit_resize_drag(*state);
-            }
-            return 0;
-        case WM_CAPTURECHANGED:
-            if (state->dragging)
-                cancel_resize_drag(*state);
-            return 0;
-        case WM_DESTROY:
-            cancel_resize_drag(*state);
-            state->window = nullptr;
-            return 0;
-        default:
-            return DefWindowProcW(window, message, wparam, lparam);
-        }
-    }
-
     void hide_audio_overlay(audio_overlay_state &state) noexcept
     {
         if (state.context != nullptr)
@@ -1520,95 +1419,6 @@ namespace
         {
             ShowWindow(state.window, SW_HIDE);
             state.visible = false;
-        }
-    }
-
-    void hide_resize_grip(resize_grip_state &state) noexcept
-    {
-        if (state.context != nullptr)
-            state.context->resize_grip_visible.store(false, std::memory_order_release);
-        if (state.dragging)
-            cancel_resize_drag(state);
-        if (state.visible)
-        {
-            ShowWindow(state.window, SW_HIDE);
-            state.visible = false;
-        }
-    }
-
-    void update_resize_grip_position(resize_grip_state &state) noexcept
-    {
-        if (state.dragging)
-            return;
-
-        if (!IsWindow(state.game_window) ||
-            !IsWindowVisible(state.game_window) ||
-            IsIconic(state.game_window))
-        {
-            hide_resize_grip(state);
-            return;
-        }
-
-        LONG_PTR style = 0;
-        if (!read_window_style(state.game_window, style) ||
-            (style & WS_CAPTION) == 0 ||
-            (style & WS_POPUP) != 0)
-        {
-            hide_resize_grip(state);
-            return;
-        }
-
-        RECT game_rect = {};
-        if (!GetWindowRect(state.game_window, &game_rect))
-        {
-            hide_resize_grip(state);
-            return;
-        }
-
-        state.dpi = GetDpiForWindow(state.game_window);
-        if (state.dpi == 0)
-            state.dpi = 96;
-        const COLORREF caption_color = read_caption_color(state.game_window);
-        const bool appearance_changed = caption_color != state.caption_color;
-        if (caption_color != state.caption_color)
-            state.caption_color = caption_color;
-        const int grip_size = scale_for_dpi(k_resize_grip_size_dip, state.dpi);
-        const RECT target = {
-            game_rect.right - grip_size,
-            game_rect.bottom - grip_size,
-            game_rect.right,
-            game_rect.bottom,
-        };
-
-        if (state.context != nullptr)
-        {
-            state.context->resize_grip_offset_x.store(
-                target.left - game_rect.left,
-                std::memory_order_relaxed);
-            state.context->resize_grip_offset_y.store(
-                target.top - game_rect.top,
-                std::memory_order_relaxed);
-            state.context->resize_grip_visible.store(true, std::memory_order_release);
-        }
-
-        if (appearance_changed ||
-            !state.visible ||
-            !EqualRect(&target, &state.last_window_rect))
-        {
-            if (render_resize_grip(state, target))
-            {
-                SetWindowPos(
-                    state.window,
-                    HWND_TOP,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE |
-                        SWP_SHOWWINDOW | SWP_NOSENDCHANGING);
-                state.last_window_rect = target;
-                state.visible = true;
-            }
         }
     }
 
@@ -1804,30 +1614,6 @@ namespace
         if (!class_registered && GetLastError() == ERROR_CLASS_ALREADY_EXISTS)
             class_registered = true;
 
-        WNDCLASSEXW grip_class = {};
-        grip_class.cbSize = sizeof(grip_class);
-        grip_class.lpfnWndProc = resize_grip_window_proc;
-        grip_class.hInstance = context->module;
-        grip_class.lpszClassName = k_resize_grip_class;
-        bool grip_class_registered = RegisterClassExW(&grip_class) != 0;
-        if (!grip_class_registered &&
-            GetLastError() == ERROR_CLASS_ALREADY_EXISTS)
-        {
-            grip_class_registered = true;
-        }
-
-        WNDCLASSEXW preview_class = {};
-        preview_class.cbSize = sizeof(preview_class);
-        preview_class.lpfnWndProc = resize_preview_window_proc;
-        preview_class.hInstance = context->module;
-        preview_class.lpszClassName = k_resize_preview_class;
-        bool preview_class_registered = RegisterClassExW(&preview_class) != 0;
-        if (!preview_class_registered &&
-            GetLastError() == ERROR_CLASS_ALREADY_EXISTS)
-        {
-            preview_class_registered = true;
-        }
-
         audio_overlay_state state;
         state.context = context;
         state.game_window = context->game_window;
@@ -1852,52 +1638,12 @@ namespace
                 &state);
         }
 
-        resize_grip_state grip;
-        grip.context = context;
-        grip.game_window = context->game_window;
-        grip.dpi = state.dpi;
-        if (grip_class_registered)
-        {
-            grip.window = CreateWindowExW(
-                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
-                k_resize_grip_class,
-                L"Arknights resize grip",
-                WS_POPUP,
-                0,
-                0,
-                1,
-                1,
-                context->game_window,
-                nullptr,
-                context->module,
-                &grip);
-        }
-        if (preview_class_registered)
-        {
-            grip.preview_window = CreateWindowExW(
-                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-                k_resize_preview_class,
-                L"Arknights resize preview",
-                WS_POPUP,
-                0,
-                0,
-                1,
-                1,
-                context->game_window,
-                nullptr,
-                context->module,
-                nullptr);
-        }
-
         context->overlay_window.store(state.window, std::memory_order_release);
-        context->resize_grip_window.store(
-            grip.window,
-            std::memory_order_release);
 
         if (state.window != nullptr && com_available)
             static_cast<void>(refresh_audio_sessions(state));
 
-        bool running = state.window != nullptr || grip.window != nullptr;
+        bool running = state.window != nullptr;
         while (running)
         {
             const HANDLE wait_handles[] = {
@@ -1929,26 +1675,14 @@ namespace
                 break;
 
             update_audio_overlay_position(state);
-            update_resize_grip_position(grip);
             if (com_available)
                 poll_audio_state(state);
         }
 
         context->overlay_visible.store(false, std::memory_order_release);
         context->overlay_window.store(nullptr, std::memory_order_release);
-        context->resize_grip_visible.store(false, std::memory_order_release);
-        context->resize_grip_window.store(nullptr, std::memory_order_release);
-        cancel_resize_drag(grip);
-        if (grip.preview_window != nullptr)
-            DestroyWindow(grip.preview_window);
-        if (grip.window != nullptr)
-            DestroyWindow(grip.window);
         if (state.window != nullptr)
             DestroyWindow(state.window);
-        if (grip_class_registered)
-            UnregisterClassW(k_resize_grip_class, context->module);
-        if (preview_class_registered)
-            UnregisterClassW(k_resize_preview_class, context->module);
         if (class_registered)
             UnregisterClassW(k_audio_overlay_class, context->module);
         if (uninitialize_com)
@@ -2011,6 +1745,7 @@ namespace arknights
         g_enhancements.thread = thread;
         g_enhancements.thread_id = thread_id;
         g_enhancements.context = context;
+        static_cast<void>(enable_native_resize(game_window));
     }
 
     void notify_window_presented() noexcept
@@ -2048,25 +1783,6 @@ namespace arknights
             SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOSIZE |
                 SWP_NOZORDER | SWP_NOSENDCHANGING);
 
-        if (context->resize_grip_visible.load(std::memory_order_acquire))
-        {
-            const HWND grip_window =
-                context->resize_grip_window.load(std::memory_order_acquire);
-            if (grip_window != nullptr)
-            {
-                SetWindowPos(
-                    grip_window,
-                    nullptr,
-                    window_x + context->resize_grip_offset_x.load(
-                        std::memory_order_relaxed),
-                    window_y + context->resize_grip_offset_y.load(
-                        std::memory_order_relaxed),
-                    0,
-                    0,
-                    SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOSIZE |
-                        SWP_NOZORDER | SWP_NOSENDCHANGING);
-            }
-        }
     }
 
     void toggle_game_fullscreen(HWND game_window) noexcept
@@ -2129,6 +1845,7 @@ namespace arknights
     void uninstall_window_enhancements() noexcept
     {
         restore_windowed_mode();
+        disable_native_resize();
 
         overlay_thread_context *const context = g_enhancements.context;
         HANDLE const thread = g_enhancements.thread;

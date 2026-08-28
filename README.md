@@ -7,7 +7,7 @@ A 64-bit ReShade add-on with quality-of-life features for the official Arknights
 - Set an operator's deployment direction with **W/A/S/D** after placing them.
 - Trigger story Skip, gacha Skip, and story confirmation Yes with **Tab** by default. Each action has its own configurable binding.
 - Toggle between windowed and fullscreen with **F12**.
-- Resize the window with a corner grip. The minimum client height is 480 px.
+- Resize the window from any edge or corner while preserving its aspect ratio. The minimum client height is 480 px.
 - Control only Arknights audio from the title bar with a mute button, volume slider, or mouse wheel.
 - Configure a primary and alternate key for every shortcut from the **ArknightsEnhancer** ReShade window. Left-click a key field and press a key to bind it, or right-click the field to unbind it.
 
