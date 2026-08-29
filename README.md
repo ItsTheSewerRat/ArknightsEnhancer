@@ -14,6 +14,21 @@ A 64-bit ReShade add-on with quality-of-life features for the official Arknights
 
 The add-on uses Windows, ReShade, and the game's existing Unity UI handlers.
 
+## Safety and account risk
+
+This is, and always will be, a risk. ArknightsEnhancer is an unofficial modification and goes against the game's Terms of Service, regardless of how harmless the individual features may be. I cannot guarantee that it is undetectable or that using it will never result in an account penalty.
+
+- **Lower relative risk:** Window resizing, fullscreen, and audio controls use Windows APIs and do not modify gameplay or server-side data.
+- **Higher relative risk:** Shortcuts directly invoke the game's existing Unity UI functions. The gacha skip only removes the client-side delay during the character reveal; it does not change the pull result or any server-side data.
+
+Before implementing any of this, I looked into what the current anti-cheat tracks and where server-side validation happens. I found no indication that these shortcuts or the gacha skip are being tracked. The anti-cheat appears to focus mainly on combat manipulation, such as changing operator or enemy stats, damage, deployment costs, skill timing, or game speed. Separately, server-side validation is used for actions that affect account or game state, such as currency, inventory, rewards, purchases, gacha results, and submitted battle results.
+
+Gacha results are validated before my skip applies. The skip lock itself is completely client-side and only enforces the delay during the character reveal and voice line. This is based on the current implementation and could change with future game or anti-cheat updates.
+
+Personally, I think it is very unlikely that these features will cause issues in the future. My previous experience with Hypergryph through Endfield shows that they generally do not care much about this kind of interaction with Unity functions. However, Arknights Global also involves Yostar, so this is only my personal assessment and not a guarantee.
+
+**Use at your own risk.**
+
 ## Requirements
 
 - Windows x64
